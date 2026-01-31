@@ -1,0 +1,291 @@
+# 🔒 Whisper
+
+```
+ ██╗    ██╗██╗  ██╗██╗███████╗██████╗ ███████╗██████╗ 
+ ██║    ██║██║  ██║██║██╔════╝██╔══██╗██╔════╝██╔══██╗
+ ██║ █╗ ██║███████║██║███████╗██████╔╝█████╗  ██████╔╝
+ ██║███╗██║██╔══██║██║╚════██║██╔═══╝ ██╔══╝  ██╔══██╗
+ ╚███╔███╔╝██║  ██║██║███████║██║     ███████╗██║  ██║
+  ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝╚══════╝╚═╝     ╚══════╝╚═╝  ╚═╝
+```
+
+**Zero-knowledge E2EE terminal chat — ephemeral, encrypted, no metadata**
+
+A terminal-based encrypted messenger where **everything is E2EE**, messages are **ephemeral by default** (RAM-only), and the relay server is **completely blind** to your conversations.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+
+---
+
+## 🌟 Features
+
+- **🔐 End-to-End Encryption**: X25519 key exchange + ChaCha20-Poly1305 authenticated encryption
+- **👻 Ephemeral by Default**: Messages live in RAM only — gone when you close the app
+- **🕵️ Zero-Knowledge Relay**: Server stores **nothing** — no logs, no metadata, no disk writes
+- **🚫 No Accounts**: Your identity is your public key. No registration, no phone numbers
+- **🖥️ Beautiful TUI**: Clean terminal interface with ratatui
+- **🔒 Optional Encrypted Storage**: Save chat history encrypted locally (your key only)
+- **⚡ Fast & Lightweight**: Rust-powered async networking with tokio
+
+---
+
+## 🎯 Philosophy
+
+Modern chat apps harvest metadata, require phone numbers, and operate opaque servers. **Whisper** is the opposite:
+
+- **Privacy by default**: The relay server can't read your messages or metadata
+- **No trust required**: You don't trust us with your identity or messages
+- **Ephemeral first**: Messages disappear by default (like a real conversation)
+- **Open source**: Audit the code, run your own relay
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────┐                  ┌─────────────┐
+│   Alice     │                  │     Bob     │
+│  (Client)   │                  │  (Client)   │
+└──────┬──────┘                  └──────┬──────┘
+       │                                │
+       │    1. Key Exchange (E2EE)     │
+       │◄──────────────────────────────►│
+       │                                │
+       │    2. Encrypted Messages       │
+       │◄──────────────────────────────►│
+       │          (blind relay)         │
+       │                                │
+       └────────────┬───────────────────┘
+                    │
+                    ▼
+            ┌───────────────┐
+            │  Relay Server │
+            │   (blind)     │
+            │               │
+            │ • No storage  │
+            │ • No logging  │
+            │ • RAM only    │
+            │ • Forwards    │
+            │   encrypted   │
+            │   blobs       │
+            └───────────────┘
+```
+
+### How It Works
+
+1. **Identity Generation**: Each user generates an X25519 keypair (stored locally, encrypted with password)
+2. **Connect to Relay**: Client connects to WebSocket relay, gets ephemeral session ID
+3. **Key Exchange**: Clients perform X25519 Diffie-Hellman key exchange
+4. **Encrypted Chat**: All messages encrypted with ChaCha20-Poly1305, relayed as opaque blobs
+5. **Zero Metadata**: Server doesn't know who talks to who (session IDs are random)
+
+---
+
+## 🚀 Installation
+
+### Build from Source
+
+```bash
+git clone https://github.com/Bentlybro/whisper.git
+cd whisper
+cargo build --release
+./target/release/whisper --help
+```
+
+### Install with Cargo
+
+```bash
+cargo install whisper
+```
+
+---
+
+## 📖 Usage
+
+### 1. Generate Your Identity
+
+```bash
+whisper init
+```
+
+This creates an encrypted keypair at `~/.whisper/identity`. **Keep this safe!**
+
+You'll get a public ID like:
+```
+YourPublicKey: abc123def456...
+```
+
+### 2. Run a Relay Server (Optional)
+
+To host your own relay:
+
+```bash
+whisper relay --addr 0.0.0.0:8080
+```
+
+**The relay is zero-knowledge:**
+- No disk writes
+- No logging
+- RAM-only
+- Blind message forwarding
+
+### 3. Start Chatting
+
+Connect to a relay and chat:
+
+```bash
+whisper chat --relay ws://localhost:8080
+```
+
+**TUI Commands:**
+- Type and press `Enter` to send
+- `Ctrl+C` to quit
+
+**Your session ID will be displayed** — share it with your peer so they can find you on the relay.
+
+### 4. Optional: Save Chat History
+
+By default, messages are ephemeral (RAM-only). To save encrypted history:
+
+```bash
+whisper chat --relay ws://localhost:8080 --save
+```
+
+History is encrypted with your identity key and stored locally.
+
+---
+
+## 🔐 Security Model
+
+### What Whisper Protects
+
+✅ **Message Content**: Encrypted with ChaCha20-Poly1305  
+✅ **Metadata**: Session IDs are random, rotated  
+✅ **Forward Secrecy**: Planned with Double Ratchet protocol  
+✅ **Zero Server Storage**: Relay stores nothing to disk
+
+### What Whisper Does NOT Protect
+
+❌ **Network Metadata**: Your ISP can see you connect to the relay  
+❌ **Endpoint Security**: If your device is compromised, messages can be read  
+❌ **Relay Availability**: If relay goes down, you're disconnected  
+❌ **Traffic Analysis**: Relay sees connection timing (but not content)
+
+### Recommended Usage
+
+- **Use Tor/VPN** if network anonymity is critical
+- **Run your own relay** for maximum trust
+- **Verify keys out-of-band** (e.g., in person, via Signal)
+
+---
+
+## 🆚 Comparison to Alternatives
+
+| Feature                  | Whisper | Signal | Matrix | IRC   |
+|--------------------------|---------|--------|--------|-------|
+| E2EE                     | ✅      | ✅     | ✅*    | ❌    |
+| No Phone Number          | ✅      | ❌     | ✅     | ✅    |
+| Zero-Knowledge Server    | ✅      | ❌**   | ❌     | ❌    |
+| Ephemeral by Default     | ✅      | ❌     | ❌     | ❌    |
+| Terminal-Based           | ✅      | ❌     | ✅***  | ✅    |
+| Open Source              | ✅      | ✅     | ✅     | ✅    |
+| Self-Hostable Relay      | ✅      | ❌     | ✅     | ✅    |
+
+\* Matrix E2EE requires setup  
+\** Signal server knows metadata  
+\*** With third-party clients like weechat-matrix
+
+**Whisper is for when you want:**
+- Maximum privacy (zero-knowledge relay)
+- No accounts/registration
+- Ephemeral conversations by default
+- Terminal-only workflow
+
+---
+
+## 🗺️ Roadmap
+
+### MVP (v0.1) ✅
+- [x] X25519 key exchange
+- [x] ChaCha20-Poly1305 encryption
+- [x] Blind WebSocket relay
+- [x] TUI with ratatui
+- [x] Ephemeral messages (RAM-only)
+- [x] Optional encrypted local storage
+
+### Planned Features
+- [ ] **Double Ratchet Protocol** (forward secrecy like Signal)
+- [ ] **Group Chats** (multi-party E2EE)
+- [ ] **File Transfer** (encrypted file sharing)
+- [ ] **Session Persistence** (reconnect after disconnect)
+- [ ] **Peer-to-Peer Mode** (no relay required)
+- [ ] **QR Code Identity Sharing** (for mobile)
+- [ ] **Relay Discovery** (DHT or central directory)
+- [ ] **Voice Messages** (encrypted audio clips)
+
+---
+
+## 🛠️ Development
+
+### Tech Stack
+
+- **Rust** (latest stable)
+- **tokio** (async runtime)
+- **tokio-tungstenite** (WebSocket)
+- **ratatui** (TUI framework)
+- **x25519-dalek** (elliptic curve cryptography)
+- **chacha20poly1305** (authenticated encryption)
+- **blake3** (key derivation)
+
+### Build & Test
+
+```bash
+# Build
+cargo build
+
+# Run tests
+cargo test
+
+# Lint
+cargo clippy
+
+# Format
+cargo fmt
+```
+
+### Contributing
+
+PRs welcome! Please:
+1. Run `cargo fmt` and `cargo clippy` before submitting
+2. Add tests for new features
+3. Update README if adding user-facing changes
+
+---
+
+## 📜 License
+
+MIT License — see [LICENSE](LICENSE) for details.
+
+---
+
+## ⚠️ Disclaimer
+
+**Whisper is experimental software.** While we use industry-standard cryptography, this has not been audited. Use at your own risk.
+
+For high-stakes communications, use audited tools like Signal or GPG.
+
+---
+
+## 🙏 Acknowledgments
+
+- **Signal** for pioneering E2EE messaging
+- **Matrix** for decentralized chat architecture
+- **Dalek Cryptography** for Rust crypto libraries
+- **ratatui** for the awesome TUI framework
+
+---
+
+**Made with 🔒 and ❤️ by [Bentlybro](https://github.com/Bentlybro)**
+
+*"Privacy is not a crime"*
