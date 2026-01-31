@@ -10,7 +10,7 @@ repository = "https://github.com/Bentlybro/whisper"
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 
 # TUI
 ratatui = "0.29"
