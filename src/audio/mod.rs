@@ -174,6 +174,10 @@ impl AudioPipeline {
         let buffer = Arc::new(std::sync::Mutex::new(Vec::<f32>::with_capacity(device_frame_size * 2)));
         let buffer_clone = buffer.clone();
 
+        // RNNoise denoiser — pure Rust, works on 48kHz, 480-sample (10ms) frames
+        // Removes background noise (keyboard, fans, AC, etc.)
+        let mut denoiser = nnnoiseless::DenoiseState::new();
+
         let stream = device.build_input_stream(
             &config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
@@ -202,8 +206,20 @@ impl AudioPipeline {
                         frame
                     };
 
+                    // Apply RNNoise denoising (480-sample chunks at 48kHz)
+                    // Our 960-sample Opus frame = two RNNoise frames
+                    let mut denoised = Vec::with_capacity(FRAME_SIZE);
+                    for chunk in resampled.chunks(nnnoiseless::FRAME_SIZE) {
+                        let mut rnn_buf = [0.0f32; nnnoiseless::FRAME_SIZE];
+                        let len = chunk.len().min(nnnoiseless::FRAME_SIZE);
+                        rnn_buf[..len].copy_from_slice(&chunk[..len]);
+                        let mut output = [0.0f32; nnnoiseless::FRAME_SIZE];
+                        denoiser.process_frame(&mut output, &rnn_buf);
+                        denoised.extend_from_slice(&output[..len]);
+                    }
+
                     let mut opus_out = vec![0u8; 4000];
-                    match encoder.encode_float(&resampled, &mut opus_out) {
+                    match encoder.encode_float(&denoised, &mut opus_out) {
                         Ok(len) => {
                             opus_out.truncate(len);
                             let _ = tx.send(opus_out);
