@@ -151,8 +151,8 @@ impl ChatClient {
                                                 let _ = ke_reply_tx.send(reply_data);
                                             }
                                             
-                                            // Send our nickname after a short delay to ensure
-                                            // key exchange reply arrives first at the peer
+                                            // Send our nickname after key exchange reply has been queued
+                                            // Use a delay to ensure the peer has processed the key exchange first
                                             if let Some(ref nick) = my_nickname_recv {
                                                 let nick = nick.clone();
                                                 let session_id_nick = session_id_recv.clone();
@@ -160,7 +160,8 @@ impl ChatClient {
                                                 let nickname_tx_clone = nickname_tx.clone();
                                                 let from_clone = from.clone();
                                                 tokio::spawn(async move {
-                                                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                                    // Wait for key exchange to propagate
+                                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                                                     let nickname_msg = PlainMessage::nickname(
                                                         session_id_nick.clone(),
                                                         nick,
@@ -198,12 +199,22 @@ impl ChatClient {
                                             if let Ok(plain_msg) = bincode::deserialize::<PlainMessage>(&plaintext) {
                                                 // Handle nickname updates
                                                 if plain_msg.system && plain_msg.nickname.is_some() {
+                                                    let new_nick = plain_msg.nickname.clone().unwrap();
                                                     drop(peers_map); // Release read lock
                                                     let mut peers_map = peers_recv.write().await;
+                                                    let old_nick = peers_map.get(&from).and_then(|p| p.nickname.clone());
                                                     if let Some(peer) = peers_map.get_mut(&from) {
-                                                        peer.nickname = plain_msg.nickname.clone();
+                                                        peer.nickname = Some(new_nick.clone());
                                                         let _ = peer_update_tx.send(peers_map.clone());
                                                     }
+                                                    drop(peers_map);
+                                                    // Send visible notification about nickname
+                                                    let display = old_nick.unwrap_or_else(|| from[..12.min(from.len())].to_string());
+                                                    let notify = PlainMessage::system(
+                                                        from.clone(),
+                                                        format!("{} is now known as {}", display, new_nick),
+                                                    );
+                                                    let _ = incoming_tx.send(notify);
                                                 } else {
                                                     let _ = incoming_tx.send(plain_msg);
                                                 }
