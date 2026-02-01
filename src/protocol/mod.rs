@@ -29,6 +29,8 @@ pub struct PlainMessage {
     pub content: String,
     #[serde(default)]
     pub system: bool,
+    #[serde(default)]
+    pub nickname: Option<String>,
 }
 
 impl PlainMessage {
@@ -38,6 +40,7 @@ impl PlainMessage {
             sender,
             content,
             system: false,
+            nickname: None,
         }
     }
 
@@ -47,6 +50,17 @@ impl PlainMessage {
             sender,
             content,
             system: true,
+            nickname: None,
+        }
+    }
+
+    pub fn nickname(sender: String, nickname: String) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().timestamp(),
+            sender,
+            content: String::new(),
+            system: true,
+            nickname: Some(nickname),
         }
     }
 }

@@ -24,9 +24,10 @@ async fn main() -> Result<()> {
             relay,
             identity,
             save,
+            name,
         } => {
             let identity_path = expand_path(&identity);
-            start_chat(&relay, &identity_path, save).await?;
+            start_chat(&relay, &identity_path, save, name).await?;
         }
         Commands::Relay { addr } => {
             relay::start_relay(addr).await?;
@@ -81,7 +82,7 @@ async fn init_identity(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn start_chat(relay_url: &str, identity_path: &PathBuf, _save_history: bool) -> Result<()> {
+async fn start_chat(relay_url: &str, identity_path: &PathBuf, _save_history: bool, nickname: Option<String>) -> Result<()> {
     // Load identity
     println!("🔐 Loading identity from: {}", identity_path.display());
     println!("Enter password:");
@@ -92,17 +93,20 @@ async fn start_chat(relay_url: &str, identity_path: &PathBuf, _save_history: boo
 
     println!("✅ Identity loaded");
     println!("📋 Your ID: {}", identity.public_key_b64());
+    if let Some(ref nick) = nickname {
+        println!("👤 Nickname: {}", nick);
+    }
     println!();
     println!("🔌 Connecting to relay: {}", relay_url);
 
-    let mut client = client::ChatClient::new(identity, relay_url.to_string());
+    let mut client = client::ChatClient::new(identity, relay_url.to_string(), nickname.clone());
     let own_id = client.identity_id();
     let session_id = client.session_id().to_string();
 
     println!("🔗 Session ID: {}", session_id);
     println!();
 
-    let (msg_tx, incoming_rx, status_rx) = client.connect().await?;
+    let (msg_tx, incoming_rx, status_rx, peer_update_rx) = client.connect().await?;
 
     println!("✅ Connected! Share your Session ID with peers to start chatting.");
     println!("Starting TUI...");
@@ -111,8 +115,8 @@ async fn start_chat(relay_url: &str, identity_path: &PathBuf, _save_history: boo
     // Small delay to let connection establish
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let mut ui = tui::ChatUI::new(own_id);
-    ui.run(msg_tx, incoming_rx, status_rx).await?;
+    let mut ui = tui::ChatUI::new(own_id, nickname);
+    ui.run(msg_tx, incoming_rx, status_rx, peer_update_rx).await?;
 
     Ok(())
 }

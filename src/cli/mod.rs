@@ -31,6 +31,10 @@ pub enum Commands {
         /// Save chat history (encrypted locally)
         #[arg(short, long)]
         save: bool,
+
+        /// Your nickname (visible to other users after E2EE)
+        #[arg(short, long)]
+        name: Option<String>,
     },
     
     /// Run a relay server
