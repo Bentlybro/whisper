@@ -167,6 +167,7 @@ wsp chat --relay ws://localhost:8080
 | `/accept-call` | Accept an incoming voice call |
 | `/reject-call` | Reject an incoming voice call |
 | `/hangup` | End the current voice call |
+| `/mute` | Toggle microphone mute during a call |
 | `/send <filepath>` | Send an encrypted file to the current tab |
 | `/accept <save_path>` | Accept an incoming file transfer |
 | `/reject` | Reject an incoming file transfer |

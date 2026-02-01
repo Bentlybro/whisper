@@ -64,6 +64,7 @@ struct OutgoingTransfer {
 struct CallState {
     peer_id: String,
     start_time: chrono::DateTime<chrono::Utc>,
+    muted: bool,
 }
 
 pub struct ChatUI {
@@ -341,15 +342,19 @@ impl ChatUI {
                 }
             }
 
-            // Send captured audio frames to peer
+            // Send captured audio frames to peer (unless muted)
             if let Some(ref call) = self.active_call {
                 let peer_id = call.peer_id.clone();
+                let is_muted = call.muted;
                 if let Some(ref mut capture_rx) = self.audio_capture_rx {
                     while let Ok(opus_frame) = capture_rx.try_recv() {
-                        let _ = msg_tx.send(OutgoingMessage::Audio {
-                            target_id: peer_id.clone(),
-                            data: opus_frame,
-                        });
+                        if !is_muted {
+                            let _ = msg_tx.send(OutgoingMessage::Audio {
+                                target_id: peer_id.clone(),
+                                data: opus_frame,
+                            });
+                        }
+                        // When muted, drain frames but don't send
                     }
                 }
             }
@@ -411,6 +416,18 @@ impl ChatUI {
                 }
                 "hangup" | "end-call" => {
                     self.handle_hangup_command(msg_tx);
+                }
+                "mute" => {
+                    if let Some(ref mut call) = self.active_call {
+                        call.muted = !call.muted;
+                        if call.muted {
+                            self.status = "🔇 Microphone muted".to_string();
+                        } else {
+                            self.status = "🔊 Microphone unmuted".to_string();
+                        }
+                    } else {
+                        self.status = "Not in a call".to_string();
+                    }
                 }
                 "send" | "share" => {
                     if parts.len() < 2 {
@@ -854,10 +871,12 @@ impl ChatUI {
             let duration = chrono::Utc::now() - call.start_time;
             let mins = duration.num_minutes();
             let secs = duration.num_seconds() % 60;
+            let mute_icon = if call.muted { "🔇" } else { "🔊" };
+            let mute_hint = if call.muted { " [MUTED]" } else { "" };
             header_line2.push(Span::raw(" | "));
             header_line2.push(Span::styled(
-                format!("🔊 {} ({}:{:02})", peer_name, mins, secs),
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                format!("{} {} ({}:{:02}){}", mute_icon, peer_name, mins, secs, mute_hint),
+                Style::default().fg(if call.muted { Color::Red } else { Color::Green }).add_modifier(Modifier::BOLD),
             ));
         }
 
@@ -881,7 +900,16 @@ impl ChatUI {
         // Input
         let input_text: String = self.input.iter().collect();
         let current_tab_name = self.get_tab_name(&self.tabs[self.active_tab]);
-        let input_title = format!("Type message in {} (Ctrl+C quit, Tab switch)", current_tab_name);
+        let input_title = if self.active_call.is_some() {
+            let mute_status = if self.active_call.as_ref().map(|c| c.muted).unwrap_or(false) {
+                "🔇 MUTED"
+            } else {
+                "🎤 LIVE"
+            };
+            format!("{} | {} | /mute /hangup", current_tab_name, mute_status)
+        } else {
+            format!("Type message in {} (Ctrl+C quit, Tab switch)", current_tab_name)
+        };
         let input = Paragraph::new(input_text)
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false })
@@ -1238,8 +1266,9 @@ impl ChatUI {
                 self.active_call = Some(CallState {
                     peer_id: peer_id.clone(),
                     start_time: chrono::Utc::now(),
+                    muted: false,
                 });
-                self.status = format!("🔊 In call with {}", peer_name);
+                self.status = format!("🔊 In call with {} | /mute to toggle mic | /hangup to end", peer_name);
 
                 let dm_tab = Tab::DirectMessage(peer_id);
                 let sys_msg = PlainMessage::system(
