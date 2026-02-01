@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 use crate::client::{OutgoingMessage, PeerInfo};
-use crate::protocol::{PlainMessage, FileOffer, FileChunk};
+use crate::protocol::{PlainMessage, FileOffer, FileChunk, GroupInvite};
 
 const FILE_CHUNK_SIZE: usize = 16384; // 16KB chunks for file transfer
 
@@ -26,6 +26,13 @@ const FILE_CHUNK_SIZE: usize = 16384; // 16KB chunks for file transfer
 enum Tab {
     Global,
     DirectMessage(String), // peer_id
+    Group(String),         // group_id
+}
+
+#[derive(Clone, Debug)]
+struct GroupInfo {
+    name: String,
+    members: Vec<String>, // session_ids of members (excluding self)
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +72,7 @@ pub struct ChatUI {
     pending_offers: HashMap<String, PendingFileOffer>,
     active_transfers: HashMap<String, ActiveTransfer>,
     outgoing_transfers: HashMap<String, OutgoingTransfer>,
+    groups: HashMap<String, GroupInfo>, // group_id -> GroupInfo
 }
 
 impl ChatUI {
@@ -85,6 +93,7 @@ impl ChatUI {
             pending_offers: HashMap::new(),
             active_transfers: HashMap::new(),
             outgoing_transfers: HashMap::new(),
+            groups: HashMap::new(),
         }
     }
 
@@ -203,6 +212,12 @@ impl ChatUI {
 
             // Check for incoming messages
             while let Ok(msg) = incoming_rx.try_recv() {
+                // Handle group invites
+                if let Some(ref invite) = msg.group_invite {
+                    self.handle_group_invite(msg.clone(), invite.clone(), msg_tx);
+                    continue;
+                }
+
                 // Handle file-related messages
                 if msg.file_offer.is_some() {
                     self.handle_file_offer(msg.clone());
@@ -212,6 +227,18 @@ impl ChatUI {
                     continue;
                 } else if let Some(accept) = msg.file_response {
                     self.handle_file_response(msg.clone(), accept, msg_tx);
+                    continue;
+                }
+
+                // Handle group messages
+                if let Some(ref group_id) = msg.group_id {
+                    let group_tab = Tab::Group(group_id.clone());
+                    // Auto-create group tab if needed (shouldn't happen normally, but safety)
+                    if !self.tabs.contains(&group_tab) {
+                        self.tabs.push(group_tab.clone());
+                        self.messages.insert(group_tab.clone(), Vec::new());
+                    }
+                    self.messages.entry(group_tab).or_insert_with(Vec::new).push(msg);
                     continue;
                 }
                 
@@ -240,14 +267,8 @@ impl ChatUI {
                         }
                         self.messages.entry(dm_tab).or_insert_with(Vec::new).push(msg);
                     } else {
-                        // Global message — put in existing DM tab if open, otherwise global
-                        let dm_tab = Tab::DirectMessage(sender_id.clone());
-                        if self.tabs.contains(&dm_tab) {
-                            // If we have a DM tab, still put global messages in global
-                            self.messages.entry(Tab::Global).or_insert_with(Vec::new).push(msg);
-                        } else {
-                            self.messages.entry(Tab::Global).or_insert_with(Vec::new).push(msg);
-                        }
+                        // Global message
+                        self.messages.entry(Tab::Global).or_insert_with(Vec::new).push(msg);
                     }
                 }
             }
@@ -305,6 +326,9 @@ impl ChatUI {
                     
                     self.status = format!("Nickname changed to: {}", new_nick);
                 }
+                "group" => {
+                    self.handle_group_command(&parts[1..], msg_tx);
+                }
                 "send" | "share" => {
                     if parts.len() < 2 {
                         self.status = "Usage: /send <filepath>".to_string();
@@ -332,7 +356,7 @@ impl ChatUI {
         }
 
         // Regular message
-        let current_tab = &self.tabs[self.active_tab];
+        let current_tab = &self.tabs[self.active_tab].clone();
         
         match current_tab {
             Tab::Global => {
@@ -352,7 +376,234 @@ impl ChatUI {
                     message: msg,
                 });
             }
+            Tab::Group(group_id) => {
+                if let Some(group) = self.groups.get(group_id) {
+                    let msg = PlainMessage::group(self.own_id.clone(), text, group_id.clone());
+                    // Add to our own group view
+                    self.messages.entry(current_tab.clone()).or_insert_with(Vec::new).push(msg.clone());
+                    // Fan out to all group members
+                    let member_ids: Vec<String> = group.members.clone();
+                    let _ = msg_tx.send(OutgoingMessage::Group {
+                        group_id: group_id.clone(),
+                        member_ids,
+                        message: msg,
+                    });
+                } else {
+                    self.status = "Group not found".to_string();
+                }
+            }
         }
+    }
+
+    fn handle_group_command(&mut self, parts: &[&str], msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        if parts.is_empty() {
+            self.status = "Usage: /group create <name> | invite <peer> | leave | members".to_string();
+            return;
+        }
+
+        match parts[0] {
+            "create" => {
+                if parts.len() < 2 {
+                    self.status = "Usage: /group create <name>".to_string();
+                    return;
+                }
+                let group_name = parts[1..].join(" ");
+                let group_id = generate_group_id();
+                
+                // Create the group locally
+                self.groups.insert(group_id.clone(), GroupInfo {
+                    name: group_name.clone(),
+                    members: Vec::new(),
+                });
+
+                // Create the tab
+                let group_tab = Tab::Group(group_id.clone());
+                self.tabs.push(group_tab.clone());
+                self.messages.insert(group_tab.clone(), Vec::new());
+                self.active_tab = self.tabs.len() - 1;
+
+                // Tell relay to join this room
+                let _ = msg_tx.send(OutgoingMessage::JoinRoom { group_id: group_id.clone() });
+
+                // Add system message
+                let sys_msg = PlainMessage::system(
+                    self.own_id.clone(),
+                    format!("Group \"{}\" created. Use /group invite <peer> to add members.", group_name),
+                );
+                self.messages.entry(group_tab).or_insert_with(Vec::new).push(sys_msg);
+
+                self.status = format!("Created group: {} ({})", group_name, &group_id[..8]);
+            }
+            "invite" => {
+                if parts.len() < 2 {
+                    self.status = "Usage: /group invite <nickname|peer_id>".to_string();
+                    return;
+                }
+                let target = parts[1];
+
+                // Must be in a group tab
+                let current_tab = self.tabs[self.active_tab].clone();
+                let group_id = match &current_tab {
+                    Tab::Group(id) => id.clone(),
+                    _ => {
+                        self.status = "Switch to a group tab first".to_string();
+                        return;
+                    }
+                };
+
+                let peer_id = match self.find_peer_by_name_or_id(target) {
+                    Some(id) => id,
+                    None => {
+                        self.status = format!("Peer not found: {}", target);
+                        return;
+                    }
+                };
+
+                // Check if already a member
+                if let Some(group) = self.groups.get(&group_id) {
+                    if group.members.contains(&peer_id) {
+                        self.status = format!("{} is already in this group", self.get_peer_display_name(&peer_id));
+                        return;
+                    }
+                }
+
+                // Get group name
+                let group_name = self.groups.get(&group_id)
+                    .map(|g| g.name.clone())
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                // Send invite via DM (encrypted with pairwise key)
+                let invite = GroupInvite {
+                    group_id: group_id.clone(),
+                    group_name: group_name.clone(),
+                };
+                let invite_msg = PlainMessage::group_invite_msg(self.own_id.clone(), invite);
+                let _ = msg_tx.send(OutgoingMessage::Direct {
+                    target_id: peer_id.clone(),
+                    message: invite_msg,
+                });
+
+                // Add them to our local group membership
+                if let Some(group) = self.groups.get_mut(&group_id) {
+                    group.members.push(peer_id.clone());
+                }
+
+                let peer_name = self.get_peer_display_name(&peer_id);
+                let sys_msg = PlainMessage::system(
+                    self.own_id.clone(),
+                    format!("{} invited to the group", peer_name),
+                );
+                self.messages.entry(current_tab).or_insert_with(Vec::new).push(sys_msg);
+                self.status = format!("Invited {} to {}", peer_name, group_name);
+            }
+            "leave" => {
+                let current_tab = self.tabs[self.active_tab].clone();
+                let group_id = match &current_tab {
+                    Tab::Group(id) => id.clone(),
+                    _ => {
+                        self.status = "Switch to a group tab first".to_string();
+                        return;
+                    }
+                };
+
+                // Tell relay to leave room
+                let _ = msg_tx.send(OutgoingMessage::LeaveRoom { group_id: group_id.clone() });
+
+                // Notify group members we're leaving
+                if let Some(group) = self.groups.get(&group_id) {
+                    let leave_msg = PlainMessage::group(
+                        self.own_id.clone(),
+                        format!("{} has left the group", self.display_name()),
+                        group_id.clone(),
+                    );
+                    // Mark as system message for display
+                    let mut sys_leave = leave_msg.clone();
+                    sys_leave.system = true;
+                    let member_ids: Vec<String> = group.members.clone();
+                    let _ = msg_tx.send(OutgoingMessage::Group {
+                        group_id: group_id.clone(),
+                        member_ids,
+                        message: sys_leave,
+                    });
+                }
+
+                // Remove group and tab
+                let group_name = self.groups.get(&group_id)
+                    .map(|g| g.name.clone())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                self.groups.remove(&group_id);
+                self.messages.remove(&current_tab);
+                if let Some(idx) = self.tabs.iter().position(|t| t == &current_tab) {
+                    self.tabs.remove(idx);
+                    if self.active_tab >= self.tabs.len() {
+                        self.active_tab = self.tabs.len().saturating_sub(1);
+                    }
+                }
+
+                self.status = format!("Left group: {}", group_name);
+            }
+            "members" => {
+                let current_tab = self.tabs[self.active_tab].clone();
+                let group_id = match &current_tab {
+                    Tab::Group(id) => id.clone(),
+                    _ => {
+                        self.status = "Switch to a group tab first".to_string();
+                        return;
+                    }
+                };
+
+                if let Some(group) = self.groups.get(&group_id) {
+                    let mut member_names: Vec<String> = group.members.iter()
+                        .map(|id| self.get_peer_display_name(id))
+                        .collect();
+                    member_names.insert(0, format!("{} (you)", self.display_name()));
+                    
+                    let members_str = member_names.join(", ");
+                    let sys_msg = PlainMessage::system(
+                        self.own_id.clone(),
+                        format!("Members ({}): {}", member_names.len(), members_str),
+                    );
+                    self.messages.entry(current_tab).or_insert_with(Vec::new).push(sys_msg);
+                    self.status = format!("{} members in group", member_names.len());
+                } else {
+                    self.status = "Group not found".to_string();
+                }
+            }
+            _ => {
+                self.status = "Usage: /group create <name> | invite <peer> | leave | members".to_string();
+            }
+        }
+    }
+
+    fn handle_group_invite(&mut self, msg: PlainMessage, invite: GroupInvite, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        let sender_name = self.get_peer_display_name(&msg.sender);
+        let group_id = invite.group_id.clone();
+        let group_name = invite.group_name.clone();
+
+        // Auto-join: create group locally, join room on relay
+        self.groups.insert(group_id.clone(), GroupInfo {
+            name: group_name.clone(),
+            members: vec![msg.sender.clone()], // The inviter is a member
+        });
+
+        // Create group tab
+        let group_tab = Tab::Group(group_id.clone());
+        if !self.tabs.contains(&group_tab) {
+            self.tabs.push(group_tab.clone());
+            self.messages.insert(group_tab.clone(), Vec::new());
+        }
+
+        // Join room on relay
+        let _ = msg_tx.send(OutgoingMessage::JoinRoom { group_id: group_id.clone() });
+
+        // Add system message
+        let sys_msg = PlainMessage::system(
+            msg.sender.clone(),
+            format!("{} invited you to \"{}\"", sender_name, group_name),
+        );
+        self.messages.entry(group_tab).or_insert_with(Vec::new).push(sys_msg);
+
+        self.status = format!("Joined group: {} (invited by {})", group_name, sender_name);
     }
 
     fn open_dm_tab(&mut self, target: &str, msg_tx: Option<&mpsc::UnboundedSender<OutgoingMessage>>) {
@@ -563,7 +814,7 @@ impl ChatUI {
         let mut msg_lines: Vec<Line> = Vec::new();
         for m in messages {
             if m.system && m.nickname.is_none() {
-                // Join/leave system messages
+                // Join/leave/system messages
                 let text = format!("[{}]", m.content);
                 let padding = (msg_inner_width as usize).saturating_sub(text.len()) / 2;
                 let padded = format!("{}{}", " ".repeat(padding), text);
@@ -706,8 +957,14 @@ impl ChatUI {
         match tab {
             Tab::Global => "#global".to_string(),
             Tab::DirectMessage(peer_id) => {
-                let name = self.get_peer_display_name(peer_id);
-                name
+                self.get_peer_display_name(peer_id)
+            }
+            Tab::Group(group_id) => {
+                if let Some(group) = self.groups.get(group_id) {
+                    format!("#{}", group.name)
+                } else {
+                    format!("#group-{}", &group_id[..8.min(group_id.len())])
+                }
             }
         }
     }
@@ -770,23 +1027,43 @@ impl ChatUI {
             total_chunks,
         };
         
-        // Determine if this is a direct message or global
+        // Determine if this is a direct message, global, or group
         let current_tab = &self.tabs[self.active_tab];
         let (is_direct, target_peer) = match current_tab {
             Tab::Global => (false, String::new()),
             Tab::DirectMessage(peer_id) => (true, peer_id.clone()),
+            Tab::Group(_group_id) => {
+                // For groups, send offer as group message (each member gets it)
+                // We'll handle this similarly to global but via group fan-out
+                (false, String::new())
+            }
         };
         
         // Send offer
         let offer_msg = PlainMessage::file_offer(self.own_id.clone(), offer.clone(), is_direct);
         
-        if is_direct {
-            let _ = msg_tx.send(OutgoingMessage::Direct {
-                target_id: target_peer.clone(),
-                message: offer_msg,
-            });
-        } else {
-            let _ = msg_tx.send(OutgoingMessage::Global(offer_msg));
+        match current_tab {
+            Tab::Group(group_id) => {
+                if let Some(group) = self.groups.get(group_id) {
+                    let member_ids = group.members.clone();
+                    let mut group_offer = offer_msg.clone();
+                    group_offer.group_id = Some(group_id.clone());
+                    let _ = msg_tx.send(OutgoingMessage::Group {
+                        group_id: group_id.clone(),
+                        member_ids,
+                        message: group_offer,
+                    });
+                }
+            }
+            Tab::DirectMessage(_) => {
+                let _ = msg_tx.send(OutgoingMessage::Direct {
+                    target_id: target_peer.clone(),
+                    message: offer_msg,
+                });
+            }
+            Tab::Global => {
+                let _ = msg_tx.send(OutgoingMessage::Global(offer_msg));
+            }
         }
         
         // Store outgoing transfer
@@ -846,6 +1123,14 @@ impl ChatUI {
                         message: response_msg,
                     });
                 }
+                Tab::Group(group_id) => {
+                    // Send acceptance directly to the file sender (not entire group)
+                    let _ = msg_tx.send(OutgoingMessage::Direct {
+                        target_id: pending.from_peer.clone(),
+                        message: response_msg,
+                    });
+                    let _ = group_id; // suppress unused warning
+                }
             }
             
             // Prepare to receive
@@ -890,6 +1175,13 @@ impl ChatUI {
                         message: response_msg,
                     });
                 }
+                Tab::Group(_group_id) => {
+                    // Send rejection directly to the file sender
+                    let _ = msg_tx.send(OutgoingMessage::Direct {
+                        target_id: pending.from_peer.clone(),
+                        message: response_msg,
+                    });
+                }
             }
             
             self.pending_offers.remove(&file_id);
@@ -905,7 +1197,9 @@ impl ChatUI {
             let sender_name = self.get_peer_display_name(&msg.sender);
             
             // Determine which tab this belongs to
-            let tab = if msg.direct {
+            let tab = if let Some(ref group_id) = msg.group_id {
+                Tab::Group(group_id.clone())
+            } else if msg.direct {
                 Tab::DirectMessage(msg.sender.clone())
             } else {
                 Tab::Global
@@ -1059,4 +1353,10 @@ impl ChatUI {
             format!("{} bytes", bytes)
         }
     }
+}
+
+fn generate_group_id() -> String {
+    use rand::Rng;
+    let random_bytes: Vec<u8> = (0..16).map(|_| rand::thread_rng().gen()).collect();
+    hex::encode(random_bytes)
 }

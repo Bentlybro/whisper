@@ -19,6 +19,23 @@ pub enum Message {
     Ack,
     /// Error
     Error { message: String },
+    /// Join a group room on the relay (relay tracks room membership)
+    GroupJoin {
+        session_id: String,
+        group_id: String,
+    },
+    /// Leave a group room on the relay
+    GroupLeave {
+        session_id: String,
+        group_id: String,
+    },
+    /// Encrypted message for a group — relay forwards to all room members except sender
+    GroupEncrypted {
+        from: String,
+        group_id: String,
+        nonce: Vec<u8>,
+        ciphertext: Vec<u8>,
+    },
 }
 
 /// File offer metadata
@@ -37,6 +54,13 @@ pub struct FileChunk {
     pub file_id: String,      // Matches the offer
     pub index: u32,           // Chunk index (0-based)
     pub data: Vec<u8>,        // Chunk data (base64 in serde)
+}
+
+/// Group invite data (sent inside a DM PlainMessage)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupInvite {
+    pub group_id: String,
+    pub group_name: String,
 }
 
 /// Plaintext message format (before encryption)
@@ -64,6 +88,12 @@ pub struct PlainMessage {
     /// File response (true = accept, false = reject)
     #[serde(default)]
     pub file_response: Option<bool>,
+    /// Group ID — identifies which group this message belongs to
+    #[serde(default)]
+    pub group_id: Option<String>,
+    /// Group invite data (sent via DM to invite someone)
+    #[serde(default)]
+    pub group_invite: Option<GroupInvite>,
 }
 
 impl PlainMessage {
@@ -79,6 +109,8 @@ impl PlainMessage {
             file_offer: None,
             file_chunk: None,
             file_response: None,
+            group_id: None,
+            group_invite: None,
         }
     }
 
@@ -94,6 +126,8 @@ impl PlainMessage {
             file_offer: None,
             file_chunk: None,
             file_response: None,
+            group_id: None,
+            group_invite: None,
         }
     }
 
@@ -109,6 +143,8 @@ impl PlainMessage {
             file_offer: None,
             file_chunk: None,
             file_response: None,
+            group_id: None,
+            group_invite: None,
         }
     }
 
@@ -124,6 +160,8 @@ impl PlainMessage {
             file_offer: None,
             file_chunk: None,
             file_response: None,
+            group_id: None,
+            group_invite: None,
         }
     }
 
@@ -139,6 +177,8 @@ impl PlainMessage {
             file_offer: None,
             file_chunk: None,
             file_response: None,
+            group_id: None,
+            group_invite: None,
         }
     }
 
@@ -154,6 +194,8 @@ impl PlainMessage {
             file_offer: Some(offer),
             file_chunk: None,
             file_response: None,
+            group_id: None,
+            group_invite: None,
         }
     }
 
@@ -169,6 +211,8 @@ impl PlainMessage {
             file_offer: None,
             file_chunk: Some(chunk),
             file_response: None,
+            group_id: None,
+            group_invite: None,
         }
     }
 
@@ -184,6 +228,44 @@ impl PlainMessage {
             file_offer: None,
             file_chunk: None,
             file_response: Some(accept),
+            group_id: None,
+            group_invite: None,
+        }
+    }
+
+    /// A group chat message
+    pub fn group(sender: String, content: String, group_id: String) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().timestamp(),
+            sender,
+            content,
+            system: false,
+            nickname: None,
+            direct: false,
+            dm_request: false,
+            file_offer: None,
+            file_chunk: None,
+            file_response: None,
+            group_id: Some(group_id),
+            group_invite: None,
+        }
+    }
+
+    /// A group invite sent via DM
+    pub fn group_invite_msg(sender: String, invite: GroupInvite) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().timestamp(),
+            sender,
+            content: String::new(),
+            system: true,
+            nickname: None,
+            direct: true,
+            dm_request: false,
+            file_offer: None,
+            file_chunk: None,
+            file_response: None,
+            group_id: None,
+            group_invite: Some(invite),
         }
     }
 }

@@ -26,7 +26,8 @@ A terminal-based encrypted messenger where **everything is E2EE**, messages are 
 - **🚫 No Accounts**: Your identity is your public key. No registration, no phone numbers
 - **🖥️ Beautiful TUI**: Clean terminal interface with ratatui
 - **💬 Direct Messages**: Private E2EE DMs via tabbed interface — relay can't tell who's talking to who
-- **📁 Encrypted File Transfer**: Send files of any size, chunked and encrypted end-to-end
+- **👥 Group Chats**: Multi-party E2EE groups with pairwise fan-out — relay routes by room ID but stays completely blind
+- **📁 Encrypted File Transfer**: Send files of any size, chunked and encrypted end-to-end (works in DMs and groups)
 - **🏷️ Nicknames**: Set display names without revealing identity
 - **🔄 Auto-Reconnect**: Seamless reconnection with keepalive — survives network hiccups
 - **🔒 Optional Encrypted Storage**: Save chat history encrypted locally (your key only)
@@ -148,6 +149,10 @@ wsp chat --relay ws://localhost:8080
 |---------|-------------|
 | `/nick <name>` | Set your display nickname |
 | `/dm <nickname\|peer_id>` | Open a direct message tab |
+| `/group create <name>` | Create a new encrypted group chat |
+| `/group invite <peer>` | Invite a peer to the current group |
+| `/group leave` | Leave the current group |
+| `/group members` | List members of the current group |
 | `/send <filepath>` | Send an encrypted file to the current tab |
 | `/accept <save_path>` | Accept an incoming file transfer |
 | `/reject` | Reject an incoming file transfer |
@@ -232,9 +237,16 @@ History is encrypted with your identity key and stored locally.
 - [x] **Encrypted File Transfer** (`/send`, `/accept`, `/reject` — chunked, any size)
 - [x] **Auto-Reconnect** (keepalive pings, automatic reconnection with backoff)
 
+### v0.3 ✅
+- [x] **Group Chats** (multi-party E2EE with pairwise fan-out — relay stays blind)
+  - `/group create <name>` — create a new encrypted group
+  - `/group invite <peer>` — invite peers via encrypted DM
+  - `/group leave` — leave the current group
+  - `/group members` — list group members
+  - File transfer works in groups too
+
 ### Planned Features
 - [ ] **Double Ratchet Protocol** (forward secrecy like Signal)
-- [ ] **Group Chats** (multi-party E2EE)
 - [ ] **Peer-to-Peer Mode** (no relay required)
 - [ ] **QR Code Identity Sharing** (for mobile)
 - [ ] **Relay Discovery** (DHT or central directory)

@@ -19,6 +19,16 @@ pub struct PeerInfo {
 pub enum OutgoingMessage {
     Global(PlainMessage),
     Direct { target_id: String, message: PlainMessage },
+    /// Send a group message — fan out to each member using pairwise encryption
+    Group {
+        group_id: String,
+        member_ids: Vec<String>,
+        message: PlainMessage,
+    },
+    /// Tell the relay to join a group room
+    JoinRoom { group_id: String },
+    /// Tell the relay to leave a group room
+    LeaveRoom { group_id: String },
 }
 
 pub struct ChatClient {
@@ -302,6 +312,28 @@ impl ChatClient {
                                         }
                                     }
                                 }
+                                Message::GroupEncrypted { from, group_id, nonce, ciphertext } => {
+                                    if from == session_id_recv {
+                                        continue; // Ignore our own messages
+                                    }
+                                    
+                                    // Try to decrypt with sender's pairwise key
+                                    let peers_map = peers_recv.read().await;
+                                    if let Some(peer_info) = peers_map.get(&from) {
+                                        match decrypt_message(&peer_info.shared_secret, &nonce, &ciphertext) {
+                                            Ok(plaintext) => {
+                                                if let Ok(mut plain_msg) = bincode::deserialize::<PlainMessage>(&plaintext) {
+                                                    // Ensure group_id is set (in case it wasn't in the inner message)
+                                                    plain_msg.group_id = Some(group_id);
+                                                    let _ = incoming_tx.send(plain_msg);
+                                                }
+                                            }
+                                            Err(_) => {
+                                                // This message was encrypted for a different group member — ignore
+                                            }
+                                        }
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -422,6 +454,61 @@ impl ChatClient {
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                                OutgoingMessage::Group { group_id, member_ids, message } => {
+                                    // Fan-out: encrypt once per member using pairwise keys,
+                                    // send as GroupEncrypted so relay routes via room
+                                    let peers_map = peers_send.read().await;
+                                    let mut sent = 0;
+                                    for member_id in &member_ids {
+                                        if let Some(peer_info) = peers_map.get(member_id) {
+                                            let serialized = bincode::serialize(&message).unwrap();
+                                            match encrypt_message(&peer_info.shared_secret, &serialized) {
+                                                Ok((nonce, ciphertext)) => {
+                                                    let encrypted_msg = Message::GroupEncrypted {
+                                                        from: session_id_send.clone(),
+                                                        group_id: group_id.clone(),
+                                                        nonce,
+                                                        ciphertext,
+                                                    };
+                                                    let data = bincode::serialize(&encrypted_msg).unwrap();
+                                                    if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
+                                                        let _ = failure_tx_send.send("Send failed".to_string());
+                                                        break;
+                                                    }
+                                                    sent += 1;
+                                                }
+                                                Err(e) => {
+                                                    let _ = status_tx_send.send(format!("❌ Group encrypt failed for {}: {}", &member_id[..12], e));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if sent == 0 && !member_ids.is_empty() {
+                                        let _ = status_tx_send.send("⚠️  No group members online".to_string());
+                                    }
+                                }
+                                OutgoingMessage::JoinRoom { group_id } => {
+                                    let join_msg = Message::GroupJoin {
+                                        session_id: session_id_send.clone(),
+                                        group_id,
+                                    };
+                                    let data = bincode::serialize(&join_msg).unwrap();
+                                    if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
+                                        let _ = failure_tx_send.send("Send failed".to_string());
+                                        break;
+                                    }
+                                }
+                                OutgoingMessage::LeaveRoom { group_id } => {
+                                    let leave_msg = Message::GroupLeave {
+                                        session_id: session_id_send.clone(),
+                                        group_id,
+                                    };
+                                    let data = bincode::serialize(&leave_msg).unwrap();
+                                    if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
+                                        let _ = failure_tx_send.send("Send failed".to_string());
+                                        break;
                                     }
                                 }
                             }
