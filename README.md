@@ -25,6 +25,10 @@ A terminal-based encrypted messenger where **everything is E2EE**, messages are 
 - **🕵️ Zero-Knowledge Relay**: Server stores **nothing** — no logs, no metadata, no disk writes
 - **🚫 No Accounts**: Your identity is your public key. No registration, no phone numbers
 - **🖥️ Beautiful TUI**: Clean terminal interface with ratatui
+- **💬 Direct Messages**: Private E2EE DMs via tabbed interface — relay can't tell who's talking to who
+- **📁 Encrypted File Transfer**: Send files of any size, chunked and encrypted end-to-end
+- **🏷️ Nicknames**: Set display names without revealing identity
+- **🔄 Auto-Reconnect**: Seamless reconnection with keepalive — survives network hiccups
 - **🔒 Optional Encrypted Storage**: Save chat history encrypted locally (your key only)
 - **⚡ Fast & Lightweight**: Rust-powered async networking with tokio
 
@@ -138,13 +142,21 @@ Connect to a relay and chat:
 wsp chat --relay ws://localhost:8080
 ```
 
-**TUI Commands:**
-- Type and press `Enter` to send
-- `Ctrl+C` to quit
+### 4. TUI Commands
 
-**Your session ID will be displayed** — share it with your peer so they can find you on the relay.
+| Command | Description |
+|---------|-------------|
+| `/nick <name>` | Set your display nickname |
+| `/dm <nickname\|peer_id>` | Open a direct message tab |
+| `/send <filepath>` | Send an encrypted file to the current tab |
+| `/accept <save_path>` | Accept an incoming file transfer |
+| `/reject` | Reject an incoming file transfer |
+| `Tab` / `Shift+Tab` | Switch between chat tabs |
+| `Shift+Enter` | Insert newline |
+| `Enter` | Send message |
+| `Ctrl+C` | Quit |
 
-### 4. Optional: Save Chat History
+### 5. Optional: Save Chat History
 
 By default, messages are ephemeral (RAM-only). To save encrypted history:
 
@@ -214,11 +226,15 @@ History is encrypted with your identity key and stored locally.
 - [x] Ephemeral messages (RAM-only)
 - [x] Optional encrypted local storage
 
+### v0.2 ✅
+- [x] **Direct Messages** (private E2EE tabs, client-side routing)
+- [x] **Nicknames** (`/nick` command, broadcast to peers)
+- [x] **Encrypted File Transfer** (`/send`, `/accept`, `/reject` — chunked, any size)
+- [x] **Auto-Reconnect** (keepalive pings, automatic reconnection with backoff)
+
 ### Planned Features
 - [ ] **Double Ratchet Protocol** (forward secrecy like Signal)
 - [ ] **Group Chats** (multi-party E2EE)
-- [ ] **File Transfer** (encrypted file sharing)
-- [ ] **Session Persistence** (reconnect after disconnect)
 - [ ] **Peer-to-Peer Mode** (no relay required)
 - [ ] **QR Code Identity Sharing** (for mobile)
 - [ ] **Relay Discovery** (DHT or central directory)
