@@ -244,8 +244,10 @@ History is encrypted with your identity key and stored locally.
   - `/group leave` — leave the current group
   - `/group members` — list group members
   - File transfer works in groups too
+- [x] **Forward-Compatible Serialization** (MessagePack replaces bincode — new fields won't break older clients)
 
 ### Planned Features
+- [ ] **E2EE Voice Calls** (`/call` — encrypted real-time audio calls in DMs)
 - [ ] **Double Ratchet Protocol** (forward secrecy like Signal)
 - [ ] **Peer-to-Peer Mode** (no relay required)
 - [ ] **QR Code Identity Sharing** (for mobile)
