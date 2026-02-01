@@ -714,6 +714,8 @@ impl ChatUI {
     fn handle_share_command(&mut self, filepath: &str, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
         const CHUNK_SIZE: usize = 16384; // 16KB chunks for reliable WebSocket transfer
         
+        self.status = format!("Reading file: {}...", filepath);
+        
         // Check if we have any peers
         if self.peers.is_empty() {
             self.status = "No peers connected to share with".to_string();
