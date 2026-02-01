@@ -61,8 +61,14 @@ struct OutgoingTransfer {
 }
 
 #[derive(Clone, Debug)]
+enum CallType {
+    Direct(String),             // peer_id
+    Group { group_id: String }, // group calls use group membership
+}
+
+#[derive(Clone, Debug)]
 struct CallState {
-    peer_id: String,
+    call_type: CallType,
     start_time: chrono::DateTime<chrono::Utc>,
     muted: bool,
 }
@@ -83,7 +89,8 @@ pub struct ChatUI {
     groups: HashMap<String, GroupInfo>, // group_id -> GroupInfo
     // Voice call state
     active_call: Option<CallState>,
-    pending_call_from: Option<String>, // peer_id of incoming call request
+    pending_call_from: Option<String>, // peer_id of incoming DM call request
+    pending_group_call: Option<(String, String)>, // (group_id, initiator_id) for incoming group call
     audio_pipeline: Option<AudioPipeline>,
     audio_capture_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>, // Opus frames from mic
 }
@@ -109,6 +116,7 @@ impl ChatUI {
             groups: HashMap::new(),
             active_call: None,
             pending_call_from: None,
+            pending_group_call: None,
             audio_pipeline: None,
             audio_capture_rx: None,
         }
@@ -243,7 +251,7 @@ impl ChatUI {
                     continue;
                 }
                 if msg.call_hangup == Some(true) {
-                    self.handle_remote_hangup(&msg);
+                    self.handle_remote_hangup(&msg, msg_tx);
                     continue;
                 }
 
@@ -321,7 +329,16 @@ impl ChatUI {
             // Handle incoming audio frames (decrypt → decode → playback)
             while let Ok((from, opus_data)) = audio_in_rx.try_recv() {
                 if let Some(ref call) = self.active_call {
-                    if call.peer_id == from {
+                    let accept = match &call.call_type {
+                        CallType::Direct(peer_id) => *peer_id == from,
+                        CallType::Group { group_id } => {
+                            // Accept audio from any member of the group
+                            self.groups.get(group_id)
+                                .map(|g| g.members.contains(&from))
+                                .unwrap_or(false)
+                        }
+                    };
+                    if accept {
                         // Decode and send to playback
                         if opus_decoder.is_none() {
                             opus_decoder = audiopus::coder::Decoder::new(
@@ -342,17 +359,27 @@ impl ChatUI {
                 }
             }
 
-            // Send captured audio frames to peer (unless muted)
+            // Send captured audio frames to peer(s) (unless muted)
             if let Some(ref call) = self.active_call {
-                let peer_id = call.peer_id.clone();
                 let is_muted = call.muted;
+                // Collect target IDs for audio
+                let target_ids: Vec<String> = match &call.call_type {
+                    CallType::Direct(peer_id) => vec![peer_id.clone()],
+                    CallType::Group { group_id } => {
+                        self.groups.get(group_id)
+                            .map(|g| g.members.clone())
+                            .unwrap_or_default()
+                    }
+                };
                 if let Some(ref mut capture_rx) = self.audio_capture_rx {
                     while let Ok(opus_frame) = capture_rx.try_recv() {
                         if !is_muted {
-                            let _ = msg_tx.send(OutgoingMessage::Audio {
-                                target_id: peer_id.clone(),
-                                data: opus_frame,
-                            });
+                            for target_id in &target_ids {
+                                let _ = msg_tx.send(OutgoingMessage::Audio {
+                                    target_id: target_id.clone(),
+                                    data: opus_frame.clone(),
+                                });
+                            }
                         }
                         // When muted, drain frames but don't send
                     }
@@ -867,7 +894,14 @@ impl ChatUI {
         ];
 
         if let Some(ref call) = self.active_call {
-            let peer_name = self.get_peer_display_name(&call.peer_id);
+            let call_label = match &call.call_type {
+                CallType::Direct(peer_id) => self.get_peer_display_name(peer_id),
+                CallType::Group { group_id } => {
+                    self.groups.get(group_id)
+                        .map(|g| g.name.clone())
+                        .unwrap_or_else(|| "Group".to_string())
+                }
+            };
             let duration = chrono::Utc::now() - call.start_time;
             let mins = duration.num_minutes();
             let secs = duration.num_seconds() % 60;
@@ -875,7 +909,7 @@ impl ChatUI {
             let mute_hint = if call.muted { " [MUTED]" } else { "" };
             header_line2.push(Span::raw(" | "));
             header_line2.push(Span::styled(
-                format!("{} {} ({}:{:02}){}", mute_icon, peer_name, mins, secs, mute_hint),
+                format!("{} {} ({}:{:02}){}", mute_icon, call_label, mins, secs, mute_hint),
                 Style::default().fg(if call.muted { Color::Red } else { Color::Green }).add_modifier(Modifier::BOLD),
             ));
         }
@@ -1098,90 +1132,164 @@ impl ChatUI {
     // Voice call methods
 
     fn handle_call_command(&mut self, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
-        // Must be in a DM tab
-        let current_tab = &self.tabs[self.active_tab].clone();
-        let peer_id = match current_tab {
-            Tab::DirectMessage(id) => id.clone(),
-            _ => {
-                self.status = "Voice calls only work in DM tabs. Use /dm <peer> first.".to_string();
-                return;
-            }
-        };
+        let current_tab = self.tabs[self.active_tab].clone();
 
         if self.active_call.is_some() {
             self.status = "Already in a call. Use /hangup first.".to_string();
             return;
         }
 
-        // Send call request
-        let call_req = PlainMessage::call_request(self.own_id.clone());
-        let _ = msg_tx.send(OutgoingMessage::Direct {
-            target_id: peer_id.clone(),
-            message: call_req,
-        });
+        match &current_tab {
+            Tab::DirectMessage(peer_id) => {
+                let peer_id = peer_id.clone();
+                // Send call request via DM
+                let call_req = PlainMessage::call_request(self.own_id.clone());
+                let _ = msg_tx.send(OutgoingMessage::Direct {
+                    target_id: peer_id.clone(),
+                    message: call_req,
+                });
 
-        let peer_name = self.get_peer_display_name(&peer_id);
-        self.status = format!("📞 Calling {}...", peer_name);
+                let peer_name = self.get_peer_display_name(&peer_id);
+                self.status = format!("📞 Calling {}...", peer_name);
 
-        // Add system message to DM
-        let sys_msg = PlainMessage::system(
-            self.own_id.clone(),
-            format!("Calling {}...", peer_name),
-        );
-        self.messages.entry(current_tab.clone()).or_insert_with(Vec::new).push(sys_msg);
+                let sys_msg = PlainMessage::system(
+                    self.own_id.clone(),
+                    format!("Calling {}...", peer_name),
+                );
+                self.messages.entry(current_tab).or_insert_with(Vec::new).push(sys_msg);
+            }
+            Tab::Group(group_id) => {
+                let group_id = group_id.clone();
+                if let Some(group) = self.groups.get(&group_id) {
+                    if group.members.is_empty() {
+                        self.status = "No members in group to call".to_string();
+                        return;
+                    }
+
+                    let group_name = group.name.clone();
+                    let member_ids = group.members.clone();
+
+                    // Send call request as a group message (fan-out)
+                    let mut call_req = PlainMessage::call_request(self.own_id.clone());
+                    call_req.group_id = Some(group_id.clone());
+                    let _ = msg_tx.send(OutgoingMessage::Group {
+                        group_id: group_id.clone(),
+                        member_ids,
+                        message: call_req,
+                    });
+
+                    // Start the call immediately (initiator is automatically in)
+                    self.start_audio_call_group(group_id.clone());
+
+                    self.status = format!("📞 Starting group call in {}...", group_name);
+
+                    let sys_msg = PlainMessage::system(
+                        self.own_id.clone(),
+                        format!("📞 Starting group call in {}", group_name),
+                    );
+                    self.messages.entry(current_tab).or_insert_with(Vec::new).push(sys_msg);
+                } else {
+                    self.status = "Group not found".to_string();
+                }
+            }
+            _ => {
+                self.status = "Voice calls work in DM or Group tabs.".to_string();
+            }
+        }
     }
 
     fn handle_accept_call_command(&mut self, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
-        let peer_id = match self.pending_call_from.take() {
-            Some(id) => id,
-            None => {
-                self.status = "No incoming call to accept.".to_string();
-                return;
-            }
-        };
-
         if self.active_call.is_some() {
             self.status = "Already in a call. Use /hangup first.".to_string();
-            self.pending_call_from = Some(peer_id);
             return;
         }
 
-        // Send acceptance
-        let accept_msg = PlainMessage::call_accept(self.own_id.clone(), true);
-        let _ = msg_tx.send(OutgoingMessage::Direct {
-            target_id: peer_id.clone(),
-            message: accept_msg,
-        });
+        // Check for pending group call first, then DM call
+        if let Some((group_id, _initiator_id)) = self.pending_group_call.take() {
+            // Accept group call — notify group members
+            if let Some(group) = self.groups.get(&group_id) {
+                let member_ids = group.members.clone();
+                let mut accept_msg = PlainMessage::call_accept(self.own_id.clone(), true);
+                accept_msg.group_id = Some(group_id.clone());
+                let _ = msg_tx.send(OutgoingMessage::Group {
+                    group_id: group_id.clone(),
+                    member_ids,
+                    message: accept_msg,
+                });
+            }
 
-        // Start audio pipeline
-        self.start_audio_call(peer_id.clone());
+            // Start audio
+            self.start_audio_call_group(group_id.clone());
+
+            let group_name = self.groups.get(&group_id)
+                .map(|g| g.name.clone())
+                .unwrap_or_else(|| "Group".to_string());
+            let sys_msg = PlainMessage::system(
+                self.own_id.clone(),
+                format!("🔊 Joined group call in {}", group_name),
+            );
+            let group_tab = Tab::Group(group_id);
+            self.messages.entry(group_tab).or_insert_with(Vec::new).push(sys_msg);
+        } else if let Some(peer_id) = self.pending_call_from.take() {
+            // Accept DM call
+            let accept_msg = PlainMessage::call_accept(self.own_id.clone(), true);
+            let _ = msg_tx.send(OutgoingMessage::Direct {
+                target_id: peer_id.clone(),
+                message: accept_msg,
+            });
+
+            // Start audio pipeline
+            self.start_audio_call(peer_id.clone());
+        } else {
+            self.status = "No incoming call to accept.".to_string();
+        }
     }
 
     fn handle_reject_call_command(&mut self, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
-        let peer_id = match self.pending_call_from.take() {
-            Some(id) => id,
-            None => {
-                self.status = "No incoming call to reject.".to_string();
-                return;
+        // Check for pending group call first, then DM call
+        if let Some((group_id, _initiator_id)) = self.pending_group_call.take() {
+            // Reject group call — notify group
+            if let Some(group) = self.groups.get(&group_id) {
+                let member_ids = group.members.clone();
+                let mut reject_msg = PlainMessage::call_accept(self.own_id.clone(), false);
+                reject_msg.group_id = Some(group_id.clone());
+                let _ = msg_tx.send(OutgoingMessage::Group {
+                    group_id: group_id.clone(),
+                    member_ids,
+                    message: reject_msg,
+                });
             }
-        };
 
-        let reject_msg = PlainMessage::call_accept(self.own_id.clone(), false);
-        let _ = msg_tx.send(OutgoingMessage::Direct {
-            target_id: peer_id.clone(),
-            message: reject_msg,
-        });
+            let group_name = self.groups.get(&group_id)
+                .map(|g| g.name.clone())
+                .unwrap_or_else(|| "Group".to_string());
+            self.status = format!("Rejected group call in {}", group_name);
 
-        let peer_name = self.get_peer_display_name(&peer_id);
-        self.status = format!("Rejected call from {}", peer_name);
+            let group_tab = Tab::Group(group_id);
+            let sys_msg = PlainMessage::system(
+                self.own_id.clone(),
+                format!("Declined group call in {}", group_name),
+            );
+            self.messages.entry(group_tab).or_insert_with(Vec::new).push(sys_msg);
+        } else if let Some(peer_id) = self.pending_call_from.take() {
+            let reject_msg = PlainMessage::call_accept(self.own_id.clone(), false);
+            let _ = msg_tx.send(OutgoingMessage::Direct {
+                target_id: peer_id.clone(),
+                message: reject_msg,
+            });
 
-        // Add system message to DM tab
-        let dm_tab = Tab::DirectMessage(peer_id.clone());
-        let sys_msg = PlainMessage::system(
-            self.own_id.clone(),
-            format!("Rejected call from {}", peer_name),
-        );
-        self.messages.entry(dm_tab).or_insert_with(Vec::new).push(sys_msg);
+            let peer_name = self.get_peer_display_name(&peer_id);
+            self.status = format!("Rejected call from {}", peer_name);
+
+            let dm_tab = Tab::DirectMessage(peer_id.clone());
+            let sys_msg = PlainMessage::system(
+                self.own_id.clone(),
+                format!("Rejected call from {}", peer_name),
+            );
+            self.messages.entry(dm_tab).or_insert_with(Vec::new).push(sys_msg);
+        } else {
+            self.status = "No incoming call to reject.".to_string();
+        }
     }
 
     fn handle_hangup_command(&mut self, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
@@ -1193,12 +1301,28 @@ impl ChatUI {
             }
         };
 
-        // Send hangup
-        let hangup_msg = PlainMessage::call_hangup(self.own_id.clone());
-        let _ = msg_tx.send(OutgoingMessage::Direct {
-            target_id: call.peer_id.clone(),
-            message: hangup_msg,
-        });
+        match &call.call_type {
+            CallType::Direct(peer_id) => {
+                let hangup_msg = PlainMessage::call_hangup(self.own_id.clone());
+                let _ = msg_tx.send(OutgoingMessage::Direct {
+                    target_id: peer_id.clone(),
+                    message: hangup_msg,
+                });
+            }
+            CallType::Group { group_id } => {
+                // Notify group members we're leaving the call
+                if let Some(group) = self.groups.get(group_id) {
+                    let member_ids = group.members.clone();
+                    let mut hangup_msg = PlainMessage::call_hangup(self.own_id.clone());
+                    hangup_msg.group_id = Some(group_id.clone());
+                    let _ = msg_tx.send(OutgoingMessage::Group {
+                        group_id: group_id.clone(),
+                        member_ids,
+                        message: hangup_msg,
+                    });
+                }
+            }
+        }
 
         self.stop_audio_call(&call);
     }
@@ -1207,51 +1331,113 @@ impl ChatUI {
         let peer_name = self.get_peer_display_name(&msg.sender);
 
         if self.active_call.is_some() {
-            // Already in a call — auto-reject would be nice but let's just notify
             self.status = format!("📞 Missed call from {} (already in a call)", peer_name);
             return;
         }
 
-        self.pending_call_from = Some(msg.sender.clone());
-        self.status = format!("📞 Incoming call from {} — /accept-call or /reject-call", peer_name);
+        if let Some(ref group_id) = msg.group_id {
+            // Group call request
+            let group_name = self.groups.get(group_id)
+                .map(|g| g.name.clone())
+                .unwrap_or_else(|| "Group".to_string());
 
-        // Ensure DM tab exists
-        let dm_tab = Tab::DirectMessage(msg.sender.clone());
-        if !self.tabs.contains(&dm_tab) {
-            self.tabs.push(dm_tab.clone());
-            self.messages.insert(dm_tab.clone(), Vec::new());
-        }
+            self.pending_group_call = Some((group_id.clone(), msg.sender.clone()));
+            self.status = format!("📞 Incoming group call in {} from {} — /accept-call or /reject-call", group_name, peer_name);
 
-        // Add system message
-        let sys_msg = PlainMessage::system(
-            msg.sender.clone(),
-            format!("📞 Incoming call from {} — /accept-call or /reject-call", peer_name),
-        );
-        self.messages.entry(dm_tab).or_insert_with(Vec::new).push(sys_msg);
-    }
+            let group_tab = Tab::Group(group_id.clone());
+            if !self.tabs.contains(&group_tab) {
+                self.tabs.push(group_tab.clone());
+                self.messages.insert(group_tab.clone(), Vec::new());
+            }
 
-    fn handle_call_response(&mut self, msg: &PlainMessage, accept: bool, _msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
-        let peer_name = self.get_peer_display_name(&msg.sender);
-        let dm_tab = Tab::DirectMessage(msg.sender.clone());
-
-        if accept {
-            // Peer accepted — start audio
-            self.start_audio_call(msg.sender.clone());
-        } else {
-            self.status = format!("{} rejected the call", peer_name);
             let sys_msg = PlainMessage::system(
                 msg.sender.clone(),
-                format!("{} rejected the call", peer_name),
+                format!("📞 {} started a group call — /accept-call or /reject-call", peer_name),
+            );
+            self.messages.entry(group_tab).or_insert_with(Vec::new).push(sys_msg);
+        } else {
+            // DM call request
+            self.pending_call_from = Some(msg.sender.clone());
+            self.status = format!("📞 Incoming call from {} — /accept-call or /reject-call", peer_name);
+
+            let dm_tab = Tab::DirectMessage(msg.sender.clone());
+            if !self.tabs.contains(&dm_tab) {
+                self.tabs.push(dm_tab.clone());
+                self.messages.insert(dm_tab.clone(), Vec::new());
+            }
+
+            let sys_msg = PlainMessage::system(
+                msg.sender.clone(),
+                format!("📞 Incoming call from {} — /accept-call or /reject-call", peer_name),
             );
             self.messages.entry(dm_tab).or_insert_with(Vec::new).push(sys_msg);
         }
     }
 
-    fn handle_remote_hangup(&mut self, msg: &PlainMessage) {
-        if let Some(ref call) = self.active_call {
-            if call.peer_id == msg.sender {
-                let call = self.active_call.take().unwrap();
-                self.stop_audio_call(&call);
+    fn handle_call_response(&mut self, msg: &PlainMessage, accept: bool, _msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        let peer_name = self.get_peer_display_name(&msg.sender);
+
+        if let Some(ref group_id) = msg.group_id {
+            // Group call response
+            let group_name = self.groups.get(group_id)
+                .map(|g| g.name.clone())
+                .unwrap_or_else(|| "Group".to_string());
+            let group_tab = Tab::Group(group_id.clone());
+
+            if accept {
+                let sys_msg = PlainMessage::system(
+                    msg.sender.clone(),
+                    format!("🔊 {} joined the group call", peer_name),
+                );
+                self.messages.entry(group_tab).or_insert_with(Vec::new).push(sys_msg);
+                self.status = format!("{} joined the call in {}", peer_name, group_name);
+            } else {
+                let sys_msg = PlainMessage::system(
+                    msg.sender.clone(),
+                    format!("{} declined the group call", peer_name),
+                );
+                self.messages.entry(group_tab).or_insert_with(Vec::new).push(sys_msg);
+            }
+        } else {
+            // DM call response
+            let dm_tab = Tab::DirectMessage(msg.sender.clone());
+
+            if accept {
+                // Peer accepted — start audio
+                self.start_audio_call(msg.sender.clone());
+            } else {
+                self.status = format!("{} rejected the call", peer_name);
+                let sys_msg = PlainMessage::system(
+                    msg.sender.clone(),
+                    format!("{} rejected the call", peer_name),
+                );
+                self.messages.entry(dm_tab).or_insert_with(Vec::new).push(sys_msg);
+            }
+        }
+    }
+
+    fn handle_remote_hangup(&mut self, msg: &PlainMessage, _msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        let peer_name = self.get_peer_display_name(&msg.sender);
+
+        if let Some(ref group_id) = msg.group_id {
+            // Group call hangup — just notify, don't end our call unless we want to
+            let group_tab = Tab::Group(group_id.clone());
+            let sys_msg = PlainMessage::system(
+                msg.sender.clone(),
+                format!("📵 {} left the group call", peer_name),
+            );
+            self.messages.entry(group_tab).or_insert_with(Vec::new).push(sys_msg);
+            // Note: we don't end our own call when someone else hangs up in a group
+        } else {
+            // DM hangup — end the call
+            if let Some(ref call) = self.active_call {
+                match &call.call_type {
+                    CallType::Direct(peer_id) if *peer_id == msg.sender => {
+                        let call = self.active_call.take().unwrap();
+                        self.stop_audio_call(&call);
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -1264,7 +1450,7 @@ impl ChatUI {
                 self.audio_capture_rx = pipeline.take_capture_rx();
                 self.audio_pipeline = Some(pipeline);
                 self.active_call = Some(CallState {
-                    peer_id: peer_id.clone(),
+                    call_type: CallType::Direct(peer_id.clone()),
                     start_time: chrono::Utc::now(),
                     muted: false,
                 });
@@ -1290,7 +1476,6 @@ impl ChatUI {
     }
 
     fn stop_audio_call(&mut self, call: &CallState) {
-        let peer_name = self.get_peer_display_name(&call.peer_id);
         let duration = chrono::Utc::now() - call.start_time;
         let mins = duration.num_minutes();
         let secs = duration.num_seconds() % 60;
@@ -1302,14 +1487,60 @@ impl ChatUI {
         self.audio_pipeline = None;
         self.audio_capture_rx = None;
 
-        self.status = format!("Call with {} ended ({}:{:02})", peer_name, mins, secs);
+        match &call.call_type {
+            CallType::Direct(peer_id) => {
+                let peer_name = self.get_peer_display_name(peer_id);
+                self.status = format!("Call with {} ended ({}:{:02})", peer_name, mins, secs);
 
-        let dm_tab = Tab::DirectMessage(call.peer_id.clone());
-        let sys_msg = PlainMessage::system(
-            self.own_id.clone(),
-            format!("📵 Call ended with {} ({}:{:02})", peer_name, mins, secs),
-        );
-        self.messages.entry(dm_tab).or_insert_with(Vec::new).push(sys_msg);
+                let dm_tab = Tab::DirectMessage(peer_id.clone());
+                let sys_msg = PlainMessage::system(
+                    self.own_id.clone(),
+                    format!("📵 Call ended with {} ({}:{:02})", peer_name, mins, secs),
+                );
+                self.messages.entry(dm_tab).or_insert_with(Vec::new).push(sys_msg);
+            }
+            CallType::Group { group_id } => {
+                let group_name = self.groups.get(group_id)
+                    .map(|g| g.name.clone())
+                    .unwrap_or_else(|| "Group".to_string());
+                self.status = format!("Left group call in {} ({}:{:02})", group_name, mins, secs);
+
+                let group_tab = Tab::Group(group_id.clone());
+                let sys_msg = PlainMessage::system(
+                    self.own_id.clone(),
+                    format!("📵 Left group call in {} ({}:{:02})", group_name, mins, secs),
+                );
+                self.messages.entry(group_tab).or_insert_with(Vec::new).push(sys_msg);
+            }
+        }
+    }
+
+    fn start_audio_call_group(&mut self, group_id: String) {
+        let group_name = self.groups.get(&group_id)
+            .map(|g| g.name.clone())
+            .unwrap_or_else(|| "Group".to_string());
+
+        match AudioPipeline::start() {
+            Ok(mut pipeline) => {
+                self.audio_capture_rx = pipeline.take_capture_rx();
+                self.audio_pipeline = Some(pipeline);
+                self.active_call = Some(CallState {
+                    call_type: CallType::Group { group_id: group_id.clone() },
+                    start_time: chrono::Utc::now(),
+                    muted: false,
+                });
+                self.status = format!("🔊 In group call: {} | /mute to toggle mic | /hangup to leave", group_name);
+            }
+            Err(e) => {
+                self.status = format!("❌ Failed to start audio: {}", e);
+                let group_tab = Tab::Group(group_id);
+                let sys_msg = PlainMessage::system(
+                    self.own_id.clone(),
+                    format!("❌ Failed to start audio: {}", e),
+                );
+                self.messages.entry(group_tab).or_insert_with(Vec::new).push(sys_msg);
+            }
+        }
     }
 
     // File sharing methods

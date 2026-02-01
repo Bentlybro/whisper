@@ -31,7 +31,7 @@ A terminal-based encrypted messenger where **everything is E2EE**, messages are 
 - **🏷️ Nicknames**: Set display names without revealing identity
 - **🔄 Auto-Reconnect**: Seamless reconnection with keepalive — survives network hiccups
 - **🔒 Optional Encrypted Storage**: Save chat history encrypted locally (your key only)
-- **🔊 E2EE Voice Calls**: Real-time encrypted voice calls in DMs — Opus codec, ChaCha20-Poly1305 per frame
+- **🔊 E2EE Voice Calls**: Real-time encrypted voice calls in DMs and group chats — Opus codec, ChaCha20-Poly1305 per frame
 - **⚡ Fast & Lightweight**: Rust-powered async networking with tokio
 
 ---
@@ -163,10 +163,10 @@ wsp chat --relay ws://localhost:8080
 | `/group invite <peer>` | Invite a peer to the current group |
 | `/group leave` | Leave the current group |
 | `/group members` | List members of the current group |
-| `/call` | Start an E2EE voice call (DM tab only) |
-| `/accept-call` | Accept an incoming voice call |
-| `/reject-call` | Reject an incoming voice call |
-| `/hangup` | End the current voice call |
+| `/call` | Start an E2EE voice call (DM or Group tab) |
+| `/accept-call` | Accept an incoming voice call (DM or group) |
+| `/reject-call` | Reject an incoming voice call (DM or group) |
+| `/hangup` | End/leave the current voice call |
 | `/mute` | Toggle microphone mute during a call |
 | `/send <filepath>` | Send an encrypted file to the current tab |
 | `/accept <save_path>` | Accept an incoming file transfer |
@@ -262,10 +262,11 @@ History is encrypted with your identity key and stored locally.
 - [x] **Forward-Compatible Serialization** (MessagePack replaces bincode — new fields won't break older clients)
 
 ### v0.4 ✅
-- [x] **E2EE Voice Calls** — Real-time encrypted voice calls in DMs
-  - `/call` — initiate a voice call in a DM tab
+- [x] **E2EE Voice Calls** — Real-time encrypted voice calls in DMs and groups
+  - `/call` — initiate a voice call in a DM or Group tab
   - `/accept-call` / `/reject-call` — respond to incoming calls
-  - `/hangup` — end the current call
+  - `/hangup` — end/leave the current call
+  - Group calls: audio fan-out to all group members with pairwise encryption
   - Opus codec (48kHz mono, 20ms frames) → ChaCha20-Poly1305 encryption → WebSocket transport
   - Low-latency audio pipeline with cpal for capture/playback
   - Status bar shows active call with duration timer
