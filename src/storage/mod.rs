@@ -20,7 +20,7 @@ impl HistoryStorage {
 
     /// Save a message to encrypted storage
     pub fn save_message(&self, msg: &PlainMessage) -> Result<()> {
-        let serialized = bincode::serialize(msg)?;
+        let serialized = rmp_serde::to_vec(msg)?;
         let (nonce, ciphertext) = encrypt_message(&self.key, &serialized)?;
         
         let mut data = nonce;
@@ -71,7 +71,8 @@ impl HistoryStorage {
 
             match decrypt_message(&self.key, nonce, ciphertext) {
                 Ok(plaintext) => {
-                    if let Ok(msg) = bincode::deserialize::<PlainMessage>(&plaintext) {
+                    if let Ok(msg) = rmp_serde::from_slice::<PlainMessage>(&plaintext)
+                        .or_else(|_| bincode::deserialize::<PlainMessage>(&plaintext)) {
                         messages.push(msg);
                     }
                 }

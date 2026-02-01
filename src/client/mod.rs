@@ -260,7 +260,7 @@ impl ChatClient {
                                                             session_id_nick.clone(),
                                                             nick,
                                                         );
-                                                        if let Ok(serialized) = bincode::serialize(&nickname_msg) {
+                                                        if let Ok(serialized) = rmp_serde::to_vec(&nickname_msg) {
                                                             if let Ok((nonce, ciphertext)) = encrypt_message(&secret_nick, &serialized) {
                                                                 let encrypted_msg = Message::Encrypted {
                                                                     from: session_id_nick,
@@ -290,7 +290,8 @@ impl ChatClient {
                                     if let Some(peer_info) = peers_map.get(&from) {
                                         match decrypt_message(&peer_info.shared_secret, &nonce, &ciphertext) {
                                             Ok(plaintext) => {
-                                                if let Ok(plain_msg) = bincode::deserialize::<PlainMessage>(&plaintext) {
+                                                if let Ok(plain_msg) = rmp_serde::from_slice::<PlainMessage>(&plaintext)
+                                                    .or_else(|_| bincode::deserialize::<PlainMessage>(&plaintext)) {
                                                     // Handle nickname updates
                                                     if plain_msg.system && plain_msg.nickname.is_some() {
                                                         let new_nick = plain_msg.nickname.clone().unwrap();
@@ -329,7 +330,8 @@ impl ChatClient {
                                     if let Some(peer_info) = peers_map.get(&from) {
                                         match decrypt_message(&peer_info.shared_secret, &nonce, &ciphertext) {
                                             Ok(plaintext) => {
-                                                if let Ok(mut plain_msg) = bincode::deserialize::<PlainMessage>(&plaintext) {
+                                                if let Ok(mut plain_msg) = rmp_serde::from_slice::<PlainMessage>(&plaintext)
+                                                    .or_else(|_| bincode::deserialize::<PlainMessage>(&plaintext)) {
                                                     // Ensure group_id is set (in case it wasn't in the inner message)
                                                     plain_msg.group_id = Some(group_id);
                                                     let _ = incoming_tx.send(plain_msg);
@@ -414,7 +416,7 @@ impl ChatClient {
                                 OutgoingMessage::Direct { target_id, message } => {
                                     let peers_map = peers_send.read().await;
                                     if let Some(peer_info) = peers_map.get(&target_id) {
-                                        let serialized = bincode::serialize(&message).unwrap();
+                                        let serialized = rmp_serde::to_vec(&message).unwrap();
                                         match encrypt_message(&peer_info.shared_secret, &serialized) {
                                             Ok((nonce, ciphertext)) => {
                                                 let encrypted_msg = Message::Encrypted {
@@ -442,7 +444,7 @@ impl ChatClient {
                                         let _ = status_tx_send.send("⚠️  No peers connected".to_string());
                                     } else {
                                         for (peer_id, peer_info) in peers_map.iter() {
-                                            let serialized = bincode::serialize(&message).unwrap();
+                                            let serialized = rmp_serde::to_vec(&message).unwrap();
                                             match encrypt_message(&peer_info.shared_secret, &serialized) {
                                                 Ok((nonce, ciphertext)) => {
                                                     let encrypted_msg = Message::Encrypted {
@@ -470,7 +472,7 @@ impl ChatClient {
                                     let mut sent = 0;
                                     for member_id in &member_ids {
                                         if let Some(peer_info) = peers_map.get(member_id) {
-                                            let serialized = bincode::serialize(&message).unwrap();
+                                            let serialized = rmp_serde::to_vec(&message).unwrap();
                                             match encrypt_message(&peer_info.shared_secret, &serialized) {
                                                 Ok((nonce, ciphertext)) => {
                                                     let encrypted_msg = Message::GroupEncrypted {
