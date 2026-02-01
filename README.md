@@ -1,12 +1,12 @@
-# 🔒 Whisper
+# 🔒 WSP
 
 ```
- ██╗    ██╗██╗  ██╗██╗███████╗██████╗ ███████╗██████╗ 
- ██║    ██║██║  ██║██║██╔════╝██╔══██╗██╔════╝██╔══██╗
- ██║ █╗ ██║███████║██║███████╗██████╔╝█████╗  ██████╔╝
- ██║███╗██║██╔══██║██║╚════██║██╔═══╝ ██╔══╝  ██╔══██╗
- ╚███╔███╔╝██║  ██║██║███████║██║     ███████╗██║  ██║
-  ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝╚══════╝╚═╝     ╚══════╝╚═╝  ╚═╝
+ ██╗    ██╗███████╗██████╗
+ ██║    ██║██╔════╝██╔══██╗
+ ██║ █╗ ██║███████╗██████╔╝
+ ██║███╗██║╚════██║██╔═══╝
+ ╚███╔███╔╝███████║██║
+  ╚══╝╚══╝ ╚══════╝╚═╝
 ```
 
 **Zero-knowledge E2EE terminal chat — ephemeral, encrypted, no metadata**
@@ -32,7 +32,7 @@ A terminal-based encrypted messenger where **everything is E2EE**, messages are 
 
 ## 🎯 Philosophy
 
-Modern chat apps harvest metadata, require phone numbers, and operate opaque servers. **Whisper** is the opposite:
+Modern chat apps harvest metadata, require phone numbers, and operate opaque servers. **WSP** is the opposite:
 
 - **Privacy by default**: The relay server can't read your messages or metadata
 - **No trust required**: You don't trust us with your identity or messages
@@ -87,16 +87,16 @@ Modern chat apps harvest metadata, require phone numbers, and operate opaque ser
 ### Build from Source
 
 ```bash
-git clone https://github.com/Bentlybro/whisper.git
-cd whisper
+git clone https://github.com/Bentlybro/wsp.git
+cd wsp
 cargo build --release
-./target/release/whisper --help
+./target/release/wsp --help
 ```
 
 ### Install with Cargo
 
 ```bash
-cargo install whisper
+cargo install wsp
 ```
 
 ---
@@ -106,10 +106,10 @@ cargo install whisper
 ### 1. Generate Your Identity
 
 ```bash
-whisper init
+wsp init
 ```
 
-This creates an encrypted keypair at `~/.whisper/identity`. **Keep this safe!**
+This creates an encrypted keypair at `~/.wsp/identity`. **Keep this safe!**
 
 You'll get a public ID like:
 ```
@@ -121,7 +121,7 @@ YourPublicKey: abc123def456...
 To host your own relay:
 
 ```bash
-whisper relay --addr 0.0.0.0:8080
+wsp relay --addr 0.0.0.0:8080
 ```
 
 **The relay is zero-knowledge:**
@@ -135,7 +135,7 @@ whisper relay --addr 0.0.0.0:8080
 Connect to a relay and chat:
 
 ```bash
-whisper chat --relay ws://localhost:8080
+wsp chat --relay ws://localhost:8080
 ```
 
 **TUI Commands:**
@@ -149,7 +149,7 @@ whisper chat --relay ws://localhost:8080
 By default, messages are ephemeral (RAM-only). To save encrypted history:
 
 ```bash
-whisper chat --relay ws://localhost:8080 --save
+wsp chat --relay ws://localhost:8080 --save
 ```
 
 History is encrypted with your identity key and stored locally.
@@ -158,18 +158,18 @@ History is encrypted with your identity key and stored locally.
 
 ## 🔐 Security Model
 
-### What Whisper Protects
+### What WSP Protects
 
-✅ **Message Content**: Encrypted with ChaCha20-Poly1305  
-✅ **Metadata**: Session IDs are random, rotated  
-✅ **Forward Secrecy**: Planned with Double Ratchet protocol  
+✅ **Message Content**: Encrypted with ChaCha20-Poly1305
+✅ **Metadata**: Session IDs are random, rotated
+✅ **Forward Secrecy**: Planned with Double Ratchet protocol
 ✅ **Zero Server Storage**: Relay stores nothing to disk
 
-### What Whisper Does NOT Protect
+### What WSP Does NOT Protect
 
-❌ **Network Metadata**: Your ISP can see you connect to the relay  
-❌ **Endpoint Security**: If your device is compromised, messages can be read  
-❌ **Relay Availability**: If relay goes down, you're disconnected  
+❌ **Network Metadata**: Your ISP can see you connect to the relay
+❌ **Endpoint Security**: If your device is compromised, messages can be read
+❌ **Relay Availability**: If relay goes down, you're disconnected
 ❌ **Traffic Analysis**: Relay sees connection timing (but not content)
 
 ### Recommended Usage
@@ -182,7 +182,7 @@ History is encrypted with your identity key and stored locally.
 
 ## 🆚 Comparison to Alternatives
 
-| Feature                  | Whisper | Signal | Matrix | IRC   |
+| Feature                  | WSP     | Signal | Matrix | IRC   |
 |--------------------------|---------|--------|--------|-------|
 | E2EE                     | ✅      | ✅     | ✅*    | ❌    |
 | No Phone Number          | ✅      | ❌     | ✅     | ✅    |
@@ -192,11 +192,11 @@ History is encrypted with your identity key and stored locally.
 | Open Source              | ✅      | ✅     | ✅     | ✅    |
 | Self-Hostable Relay      | ✅      | ❌     | ✅     | ✅    |
 
-\* Matrix E2EE requires setup  
-\** Signal server knows metadata  
+\* Matrix E2EE requires setup
+\** Signal server knows metadata
 \*** With third-party clients like weechat-matrix
 
-**Whisper is for when you want:**
+**WSP is for when you want:**
 - Maximum privacy (zero-knowledge relay)
 - No accounts/registration
 - Ephemeral conversations by default
@@ -271,7 +271,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ## ⚠️ Disclaimer
 
-**Whisper is experimental software.** While we use industry-standard cryptography, this has not been audited. Use at your own risk.
+**WSP is experimental software.** While we use industry-standard cryptography, this has not been audited. Use at your own risk.
 
 For high-stakes communications, use audited tools like Signal or GPG.
 

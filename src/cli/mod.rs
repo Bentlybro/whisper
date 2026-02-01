@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "whisper")]
+#[command(name = "wsp")]
 #[command(about = "🔒 Zero-knowledge E2EE terminal chat", long_about = None)]
 #[command(version)]
 pub struct Cli {
@@ -14,7 +14,7 @@ pub enum Commands {
     /// Initialize a new identity (generates keypair)
     Init {
         /// Path to save identity file
-        #[arg(short, long, default_value = "~/.whisper/identity")]
+        #[arg(short, long, default_value = "~/.wsp/identity")]
         path: String,
     },
     
@@ -25,7 +25,7 @@ pub enum Commands {
         relay: String,
 
         /// Identity file path
-        #[arg(short, long, default_value = "~/.whisper/identity")]
+        #[arg(short, long, default_value = "~/.wsp/identity")]
         identity: String,
 
         /// Save chat history (encrypted locally)
@@ -36,7 +36,7 @@ pub enum Commands {
     /// Run a relay server
     Relay {
         /// Address to bind to
-        #[arg(short, long, default_value = "127.0.0.1:8080")]
+        #[arg(short, long, default_value = "0.0.0.0:8080")]
         addr: String,
     },
 }

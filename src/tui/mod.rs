@@ -129,7 +129,7 @@ impl ChatUI {
         // Header
         let header = Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("🔒 Whisper", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("🔒 WSP", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::raw(" | "),
                 Span::styled("E2EE Chat", Style::default().fg(Color::Green)),
             ]),

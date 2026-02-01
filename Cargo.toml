@@ -1,11 +1,11 @@
 [package]
-name = "whisper"
+name = "wsp"
 version = "0.1.0"
 edition = "2021"
 authors = ["Bentlybro <github@bentlybro.com>"]
 description = "🔒 Zero-knowledge E2EE terminal chat — ephemeral, encrypted, no metadata"
 license = "MIT"
-repository = "https://github.com/Bentlybro/whisper"
+repository = "https://github.com/Bentlybro/wsp"
 
 [dependencies]
 # Async runtime
@@ -46,5 +46,5 @@ rpassword = "7"
 tempfile = "3"
 
 [[bin]]
-name = "whisper"
+name = "wsp"
 path = "src/main.rs"

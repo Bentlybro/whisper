@@ -30,7 +30,7 @@ impl RelayServer {
 
     pub async fn run(&self) -> Result<()> {
         let listener = TcpListener::bind(&self.addr).await?;
-        println!("🔒 Whisper Relay Server");
+        println!("🔒 WSP Relay Server");
         println!("📡 Listening on: {}", self.addr);
         println!("🚫 Zero-knowledge mode: No logging, no storage, RAM only");
         println!();
