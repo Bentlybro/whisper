@@ -222,10 +222,12 @@ impl AudioPipeline {
                     };
 
                     let mut buf = playback_buf_writer.lock().unwrap();
-                    // Limit buffer to ~200ms to avoid growing latency
-                    let max_buf = out_rate as usize * out_channels as usize / 5;
+                    // Soft limit at 500ms — only trim if we exceed it,
+                    // and trim gently back to 300ms to avoid audible gaps
+                    let max_buf = out_rate as usize * out_channels as usize / 2; // 500ms
+                    let target_buf = out_rate as usize * out_channels as usize * 3 / 10; // 300ms
                     if buf.len() > max_buf {
-                        let drain = buf.len() - max_buf;
+                        let drain = buf.len() - target_buf;
                         buf.drain(..drain);
                     }
                     buf.extend(expanded);
@@ -237,8 +239,16 @@ impl AudioPipeline {
             &config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 let mut buf = playback_buf.lock().unwrap();
+                let mut last_sample = 0.0f32;
                 for sample in data.iter_mut() {
-                    *sample = buf.pop_front().unwrap_or(0.0);
+                    if let Some(s) = buf.pop_front() {
+                        last_sample = s;
+                        *sample = s;
+                    } else {
+                        // Underrun — fade to silence instead of hard cut
+                        last_sample *= 0.95;
+                        *sample = last_sample;
+                    }
                 }
             },
             |err| {
