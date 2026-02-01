@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Frame, Terminal,
 };
 use std::io;
@@ -117,12 +117,23 @@ impl ChatUI {
     }
 
     fn ui(&self, f: &mut Frame) {
+        // Calculate input box height based on text wrapping
+        // Inner width = total width - 2 (borders)
+        let total_width = f.area().width as usize;
+        let inner_width = if total_width > 2 { total_width - 2 } else { 1 };
+        let input_lines = if self.input.is_empty() {
+            1
+        } else {
+            (self.input.len() + inner_width - 1) / inner_width
+        };
+        let input_height = (input_lines as u16) + 2; // +2 for borders
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),
                 Constraint::Min(1),
-                Constraint::Length(3),
+                Constraint::Length(input_height),
             ])
             .split(f.area());
 
@@ -143,41 +154,76 @@ impl ChatUI {
         .block(Block::default().borders(Borders::ALL).title("Status"));
         f.render_widget(header, chunks[0]);
 
-        // Messages
-        let messages: Vec<ListItem> = self
-            .messages
-            .iter()
-            .map(|m| {
-                let timestamp = chrono::DateTime::from_timestamp(m.timestamp, 0)
-                    .map(|dt| dt.format("%H:%M:%S").to_string())
-                    .unwrap_or_else(|| "??:??:??".to_string());
-                
-                let is_own = m.sender == self.own_id;
-                let sender_short = &m.sender[..8.min(m.sender.len())];
-                
-                let line = Line::from(vec![
-                    Span::styled(
-                        format!("[{}] ", timestamp),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        format!("{}: ", sender_short),
-                        Style::default().fg(if is_own { Color::Cyan } else { Color::Magenta }),
-                    ),
-                    Span::raw(&m.content),
-                ]);
-                
-                ListItem::new(line)
-            })
-            .collect();
+        // Messages - use Paragraph with wrap for proper text wrapping
+        let msg_area = chunks[1];
+        let msg_inner_width = if msg_area.width > 2 { msg_area.width - 2 } else { 1 };
+        let msg_inner_height = if msg_area.height > 2 { msg_area.height - 2 } else { 0 };
 
-        let messages_widget = List::new(messages)
+        let mut msg_lines: Vec<Line> = Vec::new();
+        for m in &self.messages {
+            let timestamp = chrono::DateTime::from_timestamp(m.timestamp, 0)
+                .map(|dt| dt.format("%H:%M:%S").to_string())
+                .unwrap_or_else(|| "??:??:??".to_string());
+
+            let is_own = m.sender == self.own_id;
+            let sender_short = &m.sender[..8.min(m.sender.len())];
+            let prefix = format!("[{}] {}: ", timestamp, sender_short);
+            let prefix_style = if is_own { Color::Cyan } else { Color::Magenta };
+
+            // Manually wrap: first line has prefix, continuation lines are indented
+            let content = &m.content;
+            let available = (msg_inner_width as usize).saturating_sub(prefix.len());
+
+            if available == 0 || content.is_empty() {
+                msg_lines.push(Line::from(vec![
+                    Span::styled(format!("[{}] ", timestamp), Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!("{}: ", sender_short), Style::default().fg(prefix_style)),
+                    Span::raw(content),
+                ]));
+            } else {
+                let mut chars: Vec<char> = content.chars().collect();
+                let mut first = true;
+                let indent = " ".repeat(prefix.len());
+
+                while !chars.is_empty() {
+                    let take = if first { available } else { (msg_inner_width as usize).saturating_sub(indent.len()) };
+                    let chunk_len = take.min(chars.len());
+                    let chunk: String = chars.drain(..chunk_len).collect();
+
+                    if first {
+                        msg_lines.push(Line::from(vec![
+                            Span::styled(format!("[{}] ", timestamp), Style::default().fg(Color::DarkGray)),
+                            Span::styled(format!("{}: ", sender_short), Style::default().fg(prefix_style)),
+                            Span::raw(chunk),
+                        ]));
+                        first = false;
+                    } else {
+                        msg_lines.push(Line::from(vec![
+                            Span::raw(indent.clone()),
+                            Span::raw(chunk),
+                        ]));
+                    }
+                }
+            }
+        }
+
+        // Auto-scroll: only show the last N lines that fit
+        let total_lines = msg_lines.len() as u16;
+        let scroll_offset = if total_lines > msg_inner_height {
+            total_lines - msg_inner_height
+        } else {
+            0
+        };
+
+        let messages_widget = Paragraph::new(msg_lines)
+            .scroll((scroll_offset, 0))
             .block(Block::default().borders(Borders::ALL).title("Messages"));
-        f.render_widget(messages_widget, chunks[1]);
+        f.render_widget(messages_widget, msg_area);
 
-        // Input
+        // Input with text wrapping
         let input = Paragraph::new(self.input.as_str())
             .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false })
             .block(Block::default().borders(Borders::ALL).title("Type message (Ctrl+C to quit)"));
         f.render_widget(input, chunks[2]);
     }
