@@ -174,16 +174,25 @@ impl ChatUI {
                     // System messages (join/leave) go to global chat
                     self.messages.entry(Tab::Global).or_insert_with(Vec::new).push(msg);
                 } else if !msg.system {
-                    // Regular messages - try to match to DM tab or put in global
                     let sender_id = msg.sender.clone();
-                    let dm_tab = Tab::DirectMessage(sender_id.clone());
                     
-                    // If we have a DM tab open with this peer, put message there
-                    if self.tabs.contains(&dm_tab) {
+                    if msg.direct {
+                        // Direct message — auto-create DM tab if needed
+                        let dm_tab = Tab::DirectMessage(sender_id.clone());
+                        if !self.tabs.contains(&dm_tab) {
+                            self.tabs.push(dm_tab.clone());
+                            self.messages.insert(dm_tab.clone(), Vec::new());
+                        }
                         self.messages.entry(dm_tab).or_insert_with(Vec::new).push(msg);
                     } else {
-                        // Otherwise it's a global message
-                        self.messages.entry(Tab::Global).or_insert_with(Vec::new).push(msg);
+                        // Global message — put in existing DM tab if open, otherwise global
+                        let dm_tab = Tab::DirectMessage(sender_id.clone());
+                        if self.tabs.contains(&dm_tab) {
+                            // If we have a DM tab, still put global messages in global
+                            self.messages.entry(Tab::Global).or_insert_with(Vec::new).push(msg);
+                        } else {
+                            self.messages.entry(Tab::Global).or_insert_with(Vec::new).push(msg);
+                        }
                     }
                 }
             }
@@ -248,16 +257,17 @@ impl ChatUI {
 
         // Regular message
         let current_tab = &self.tabs[self.active_tab];
-        let msg = PlainMessage::new(self.own_id.clone(), text);
         
         match current_tab {
             Tab::Global => {
+                let msg = PlainMessage::new(self.own_id.clone(), text);
                 // Add to our own view
                 self.messages.entry(Tab::Global).or_insert_with(Vec::new).push(msg.clone());
                 // Send to all peers
                 let _ = msg_tx.send(OutgoingMessage::Global(msg));
             }
             Tab::DirectMessage(peer_id) => {
+                let msg = PlainMessage::direct(self.own_id.clone(), text);
                 // Add to our own DM view
                 self.messages.entry(current_tab.clone()).or_insert_with(Vec::new).push(msg.clone());
                 // Send to specific peer

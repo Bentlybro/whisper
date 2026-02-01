@@ -31,6 +31,9 @@ pub struct PlainMessage {
     pub system: bool,
     #[serde(default)]
     pub nickname: Option<String>,
+    /// Whether this is a direct message (vs global broadcast)
+    #[serde(default)]
+    pub direct: bool,
 }
 
 impl PlainMessage {
@@ -41,6 +44,18 @@ impl PlainMessage {
             content,
             system: false,
             nickname: None,
+            direct: false,
+        }
+    }
+
+    pub fn direct(sender: String, content: String) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().timestamp(),
+            sender,
+            content,
+            system: false,
+            nickname: None,
+            direct: true,
         }
     }
 
@@ -51,6 +66,7 @@ impl PlainMessage {
             content,
             system: true,
             nickname: None,
+            direct: false,
         }
     }
 
@@ -61,6 +77,7 @@ impl PlainMessage {
             content: String::new(),
             system: true,
             nickname: Some(nickname),
+            direct: false,
         }
     }
 }

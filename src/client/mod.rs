@@ -151,24 +151,33 @@ impl ChatClient {
                                                 let _ = ke_reply_tx.send(reply_data);
                                             }
                                             
-                                            // Send our nickname to this peer
+                                            // Send our nickname after a short delay to ensure
+                                            // key exchange reply arrives first at the peer
                                             if let Some(ref nick) = my_nickname_recv {
-                                                let nickname_msg = PlainMessage::nickname(
-                                                    session_id_recv.clone(),
-                                                    nick.clone(),
-                                                );
-                                                if let Ok(serialized) = bincode::serialize(&nickname_msg) {
-                                                    if let Ok((nonce, ciphertext)) = encrypt_message(&secret, &serialized) {
-                                                        let encrypted_msg = Message::Encrypted {
-                                                            from: session_id_recv.clone(),
-                                                            nonce,
-                                                            ciphertext,
-                                                        };
-                                                        if let Ok(data) = bincode::serialize(&encrypted_msg) {
-                                                            let _ = nickname_tx.send((from.clone(), data));
+                                                let nick = nick.clone();
+                                                let session_id_nick = session_id_recv.clone();
+                                                let secret_nick = secret.clone();
+                                                let nickname_tx_clone = nickname_tx.clone();
+                                                let from_clone = from.clone();
+                                                tokio::spawn(async move {
+                                                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                                    let nickname_msg = PlainMessage::nickname(
+                                                        session_id_nick.clone(),
+                                                        nick,
+                                                    );
+                                                    if let Ok(serialized) = bincode::serialize(&nickname_msg) {
+                                                        if let Ok((nonce, ciphertext)) = encrypt_message(&secret_nick, &serialized) {
+                                                            let encrypted_msg = Message::Encrypted {
+                                                                from: session_id_nick,
+                                                                nonce,
+                                                                ciphertext,
+                                                            };
+                                                            if let Ok(data) = bincode::serialize(&encrypted_msg) {
+                                                                let _ = nickname_tx_clone.send((from_clone, data));
+                                                            }
                                                         }
                                                     }
-                                                }
+                                                });
                                             }
                                         }
                                     }
