@@ -31,7 +31,7 @@ A terminal-based encrypted messenger where **everything is E2EE**, messages are 
 - **🏷️ Nicknames**: Set display names without revealing identity
 - **🔄 Auto-Reconnect**: Seamless reconnection with keepalive — survives network hiccups
 - **🔒 Optional Encrypted Storage**: Save chat history encrypted locally (your key only)
-- **🔊 E2EE Voice Calls**: Real-time encrypted voice calls in DMs and group chats — Opus codec, ChaCha20-Poly1305 per frame
+- **🔊 E2EE Voice Calls**: Real-time encrypted voice calls in DMs and group chats — Opus codec, ChaCha20-Poly1305 per frame, RNNoise noise suppression
 - **⚡ Fast & Lightweight**: Rust-powered async networking with tokio
 
 ---
@@ -268,7 +268,8 @@ History is encrypted with your identity key and stored locally.
   - `/hangup` — end/leave the current call
   - Group calls: audio fan-out to all group members with pairwise encryption
   - Opus codec (48kHz mono, 20ms frames) → ChaCha20-Poly1305 encryption → WebSocket transport
-  - Low-latency audio pipeline with cpal for capture/playback
+  - **RNNoise noise suppression** — removes background noise (keyboard, fans, AC, breathing) in real-time
+  - Lock-free ring buffer playback for glitch-free audio on Linux/ALSA
   - Status bar shows active call with duration timer
 
 ### Planned Features
@@ -293,6 +294,7 @@ History is encrypted with your identity key and stored locally.
 - **blake3** (key derivation)
 - **cpal** (cross-platform audio I/O)
 - **audiopus** (Opus codec for voice)
+- **nnnoiseless** (RNNoise noise suppression, pure Rust)
 
 ### Build & Test
 
