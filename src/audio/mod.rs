@@ -1,6 +1,6 @@
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -8,15 +8,81 @@ const OPUS_SAMPLE_RATE: u32 = 48000;
 const OPUS_CHANNELS: u16 = 1;
 const FRAME_SIZE: usize = 960; // 20ms at 48kHz mono
 
+/// Lock-free ring buffer for audio playback
+/// Avoids mutex contention between the network thread and ALSA callback
+struct RingBuffer {
+    buf: Vec<std::sync::atomic::AtomicU32>, // f32 bits stored as u32
+    capacity: usize,
+    read_pos: AtomicUsize,
+    write_pos: AtomicUsize,
+}
+
+impl RingBuffer {
+    fn new(capacity: usize) -> Self {
+        let mut buf = Vec::with_capacity(capacity);
+        for _ in 0..capacity {
+            buf.push(std::sync::atomic::AtomicU32::new(0));
+        }
+        Self {
+            buf,
+            capacity,
+            read_pos: AtomicUsize::new(0),
+            write_pos: AtomicUsize::new(0),
+        }
+    }
+
+    fn available(&self) -> usize {
+        let w = self.write_pos.load(Ordering::Acquire);
+        let r = self.read_pos.load(Ordering::Acquire);
+        if w >= r { w - r } else { self.capacity - r + w }
+    }
+
+    fn free_space(&self) -> usize {
+        self.capacity - 1 - self.available()
+    }
+
+    fn write(&self, samples: &[f32]) -> usize {
+        let free = self.free_space();
+        let to_write = samples.len().min(free);
+        let mut pos = self.write_pos.load(Ordering::Relaxed);
+        for i in 0..to_write {
+            let bits = samples[i].to_bits();
+            self.buf[pos].store(bits, Ordering::Relaxed);
+            pos = (pos + 1) % self.capacity;
+        }
+        self.write_pos.store(pos, Ordering::Release);
+        to_write
+    }
+
+    fn read(&self, output: &mut [f32]) -> usize {
+        let avail = self.available();
+        let to_read = output.len().min(avail);
+        let mut pos = self.read_pos.load(Ordering::Relaxed);
+        for i in 0..to_read {
+            let bits = self.buf[pos].load(Ordering::Relaxed);
+            output[i] = f32::from_bits(bits);
+            pos = (pos + 1) % self.capacity;
+        }
+        self.read_pos.store(pos, Ordering::Release);
+        to_read
+    }
+
+    /// Drop oldest samples to keep latency bounded
+    fn trim_to(&self, max_samples: usize) {
+        let avail = self.available();
+        if avail > max_samples {
+            let skip = avail - max_samples;
+            let r = self.read_pos.load(Ordering::Relaxed);
+            self.read_pos.store((r + skip) % self.capacity, Ordering::Release);
+        }
+    }
+}
+
 /// Manages audio capture and playback for voice calls
 pub struct AudioPipeline {
-    /// Sends encoded Opus frames out (to be encrypted and sent over wire)
     capture_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
-    /// Receives decoded PCM audio for playback
     playback_tx: Option<mpsc::UnboundedSender<Vec<f32>>>,
-    /// Flag to stop the pipeline
     running: Arc<AtomicBool>,
-    /// cpal streams (kept alive — dropping stops them)
     _capture_stream: Option<cpal::Stream>,
     _playback_stream: Option<cpal::Stream>,
 }
@@ -26,7 +92,6 @@ impl AudioPipeline {
         let host = cpal::default_host();
         let running = Arc::new(AtomicBool::new(true));
 
-        // --- Opus encoder/decoder ---
         let encoder = audiopus::coder::Encoder::new(
             audiopus::SampleRate::Hz48000,
             audiopus::Channels::Mono,
@@ -38,11 +103,11 @@ impl AudioPipeline {
             audiopus::Channels::Mono,
         ).map_err(|e| anyhow::anyhow!("Failed to create Opus decoder: {}", e))?;
 
-        // --- Capture (microphone) ---
+        // --- Capture ---
         let (capture_tx, capture_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let capture_stream = Self::start_capture(&host, encoder, capture_tx, running.clone())?;
 
-        // --- Playback (speaker) ---
+        // --- Playback ---
         let (playback_tx, playback_rx) = mpsc::unbounded_channel::<Vec<f32>>();
         let playback_stream = Self::start_playback(&host, decoder, playback_rx, running.clone())?;
 
@@ -92,7 +157,6 @@ impl AudioPipeline {
         let device = host.default_input_device()
             .ok_or_else(|| anyhow::anyhow!("No audio input device found"))?;
 
-        // Use device's default config instead of forcing our own
         let default_config = device.default_input_config()
             .map_err(|e| anyhow::anyhow!("No default input config: {}", e))?;
 
@@ -105,7 +169,6 @@ impl AudioPipeline {
             buffer_size: cpal::BufferSize::Default,
         };
 
-        // Calculate how many device samples = one 20ms Opus frame
         let device_frame_size = (device_sample_rate as usize * 20) / 1000 * device_channels as usize;
 
         let buffer = Arc::new(std::sync::Mutex::new(Vec::<f32>::with_capacity(device_frame_size * 2)));
@@ -123,7 +186,6 @@ impl AudioPipeline {
                 while buf.len() >= device_frame_size {
                     let raw_frame: Vec<f32> = buf.drain(..device_frame_size).collect();
 
-                    // Convert to mono if needed
                     let mono = if device_channels > 1 {
                         raw_frame.chunks(device_channels as usize)
                             .map(|ch| ch.iter().sum::<f32>() / device_channels as f32)
@@ -132,17 +194,14 @@ impl AudioPipeline {
                         raw_frame
                     };
 
-                    // Resample to 48kHz if needed
                     let resampled = if device_sample_rate != OPUS_SAMPLE_RATE {
                         linear_resample(&mono, device_sample_rate, OPUS_SAMPLE_RATE, FRAME_SIZE)
                     } else {
-                        // Might need to pad/truncate to exact FRAME_SIZE
                         let mut frame = mono;
                         frame.resize(FRAME_SIZE, 0.0);
                         frame
                     };
 
-                    // Encode to Opus
                     let mut opus_out = vec![0u8; 4000];
                     match encoder.encode_float(&resampled, &mut opus_out) {
                         Ok(len) => {
@@ -184,71 +243,68 @@ impl AudioPipeline {
             buffer_size: cpal::BufferSize::Default,
         };
 
-        // Ring buffer for playback
-        let playback_buf = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<f32>::new()));
-        let playback_buf_writer = playback_buf.clone();
+        // Lock-free ring buffer — 1 second capacity
+        let ring_capacity = device_sample_rate as usize * device_channels as usize;
+        let ring = Arc::new(RingBuffer::new(ring_capacity));
+        let ring_writer = ring.clone();
 
         let running_clone = running.clone();
         let out_channels = device_channels;
         let out_rate = device_sample_rate;
+        // Max latency: 500ms in samples
+        let max_latency_samples = out_rate as usize * out_channels as usize / 2;
 
+        // Writer thread: receives decoded PCM, resamples, writes to ring buffer
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async {
-                let mut rx = rx;
-                while let Some(samples) = rx.recv().await {
-                    if !running_clone.load(Ordering::Relaxed) {
-                        break;
+            // Use a simple blocking loop instead of a tokio runtime
+            // to minimize latency and avoid runtime overhead
+            let mut rx = rx;
+            loop {
+                match rx.blocking_recv() {
+                    Some(samples) => {
+                        if !running_clone.load(Ordering::Relaxed) {
+                            break;
+                        }
+
+                        // Resample from 48kHz to device rate if needed
+                        let resampled = if out_rate != OPUS_SAMPLE_RATE {
+                            let target_len = (samples.len() as u64 * out_rate as u64 / OPUS_SAMPLE_RATE as u64) as usize;
+                            linear_resample(&samples, OPUS_SAMPLE_RATE, out_rate, target_len)
+                        } else {
+                            samples
+                        };
+
+                        // Expand mono to multi-channel if needed
+                        let expanded = if out_channels > 1 {
+                            resampled.iter()
+                                .flat_map(|&s| std::iter::repeat(s).take(out_channels as usize))
+                                .collect::<Vec<f32>>()
+                        } else {
+                            resampled
+                        };
+
+                        // Trim if latency is growing too high
+                        ring_writer.trim_to(max_latency_samples);
+                        ring_writer.write(&expanded);
                     }
-
-                    // Resample from 48kHz to device rate if needed
-                    let resampled = if out_rate != OPUS_SAMPLE_RATE {
-                        let target_len = (samples.len() as u64 * out_rate as u64 / OPUS_SAMPLE_RATE as u64) as usize;
-                        linear_resample(&samples, OPUS_SAMPLE_RATE, out_rate, target_len)
-                    } else {
-                        samples
-                    };
-
-                    // Expand mono to multi-channel if needed
-                    let expanded = if out_channels > 1 {
-                        resampled.iter()
-                            .flat_map(|&s| std::iter::repeat(s).take(out_channels as usize))
-                            .collect::<Vec<f32>>()
-                    } else {
-                        resampled
-                    };
-
-                    let mut buf = playback_buf_writer.lock().unwrap();
-                    // Soft limit at 500ms — only trim if we exceed it,
-                    // and trim gently back to 300ms to avoid audible gaps
-                    let max_buf = out_rate as usize * out_channels as usize / 2; // 500ms
-                    let target_buf = out_rate as usize * out_channels as usize * 3 / 10; // 300ms
-                    if buf.len() > max_buf {
-                        let drain = buf.len() - target_buf;
-                        buf.drain(..drain);
-                    }
-                    buf.extend(expanded);
+                    None => break,
                 }
-            });
+            }
         });
 
+        // Playback callback — lock-free, just reads from ring buffer
+        let mut last_sample = 0.0f32;
         let stream = device.build_output_stream(
             &config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let mut buf = playback_buf.lock().unwrap();
-                let mut last_sample = 0.0f32;
-                for sample in data.iter_mut() {
-                    if let Some(s) = buf.pop_front() {
-                        last_sample = s;
-                        *sample = s;
-                    } else {
-                        // Underrun — fade to silence instead of hard cut
-                        last_sample *= 0.95;
-                        *sample = last_sample;
-                    }
+                let read = ring.read(data);
+                if read > 0 {
+                    last_sample = data[read - 1];
+                }
+                // Fill remainder with fade-to-silence on underrun
+                for sample in data[read..].iter_mut() {
+                    last_sample *= 0.95;
+                    *sample = last_sample;
                 }
             },
             |err| {
