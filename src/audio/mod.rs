@@ -207,15 +207,21 @@ impl AudioPipeline {
                     };
 
                     // Apply RNNoise denoising (480-sample chunks at 48kHz)
-                    // Our 960-sample Opus frame = two RNNoise frames
+                    // RNNoise expects i16-range samples [-32768, 32767], not float [-1, 1]
                     let mut denoised = Vec::with_capacity(FRAME_SIZE);
                     for chunk in resampled.chunks(nnnoiseless::FRAME_SIZE) {
                         let mut rnn_buf = [0.0f32; nnnoiseless::FRAME_SIZE];
                         let len = chunk.len().min(nnnoiseless::FRAME_SIZE);
-                        rnn_buf[..len].copy_from_slice(&chunk[..len]);
+                        // Scale up to i16 range for RNNoise
+                        for i in 0..len {
+                            rnn_buf[i] = chunk[i] * 32767.0;
+                        }
                         let mut output = [0.0f32; nnnoiseless::FRAME_SIZE];
                         denoiser.process_frame(&mut output, &rnn_buf);
-                        denoised.extend_from_slice(&output[..len]);
+                        // Scale back to float range for Opus
+                        for i in 0..len {
+                            denoised.push(output[i] / 32767.0);
+                        }
                     }
 
                     let mut opus_out = vec![0u8; 4000];
