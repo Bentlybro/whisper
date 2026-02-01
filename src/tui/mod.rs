@@ -149,8 +149,9 @@ impl ChatUI {
                             KeyCode::End => {
                                 self.cursor = self.input.len();
                             }
-                            KeyCode::Enter if key.modifiers.contains(event::KeyModifiers::SHIFT) => {
-                                // Shift+Enter inserts a newline
+                            KeyCode::Enter if key.modifiers.contains(event::KeyModifiers::SHIFT) 
+                                || key.modifiers.contains(event::KeyModifiers::ALT) => {
+                                // Shift+Enter or Alt+Enter inserts a newline
                                 self.input.insert(self.cursor, '\n');
                                 self.cursor += 1;
                             }
@@ -529,6 +530,7 @@ impl ChatUI {
 
             let content = &m.content;
             let available = (msg_inner_width as usize).saturating_sub(prefix.len());
+            let indent = " ".repeat(prefix.len());
 
             if available == 0 || content.is_empty() {
                 msg_lines.push(Line::from(vec![
@@ -537,31 +539,49 @@ impl ChatUI {
                     Span::raw(content),
                 ]));
             } else {
-                let mut chars: Vec<char> = content.chars().collect();
+                // Split content by newlines first, then wrap each line
+                let content_lines: Vec<&str> = content.split('\n').collect();
                 let mut first = true;
-                let indent = " ".repeat(prefix.len());
 
-                while !chars.is_empty() {
-                    let take = if first {
-                        available
-                    } else {
-                        (msg_inner_width as usize).saturating_sub(indent.len())
-                    };
-                    let chunk_len = take.min(chars.len());
-                    let chunk: String = chars.drain(..chunk_len).collect();
+                for line in content_lines {
+                    let mut chars: Vec<char> = line.chars().collect();
+                    
+                    // Handle empty lines (from consecutive newlines)
+                    if chars.is_empty() {
+                        if first {
+                            msg_lines.push(Line::from(vec![
+                                Span::styled(format!("[{}] ", timestamp), Style::default().fg(Color::DarkGray)),
+                                Span::styled(format!("{}: ", sender_display), Style::default().fg(prefix_style)),
+                            ]));
+                            first = false;
+                        } else {
+                            msg_lines.push(Line::from(Span::raw(indent.clone())));
+                        }
+                        continue;
+                    }
 
-                    if first {
-                        msg_lines.push(Line::from(vec![
-                            Span::styled(format!("[{}] ", timestamp), Style::default().fg(Color::DarkGray)),
-                            Span::styled(format!("{}: ", sender_display), Style::default().fg(prefix_style)),
-                            Span::raw(chunk),
-                        ]));
-                        first = false;
-                    } else {
-                        msg_lines.push(Line::from(vec![
-                            Span::raw(indent.clone()),
-                            Span::raw(chunk),
-                        ]));
+                    while !chars.is_empty() {
+                        let take = if first {
+                            available
+                        } else {
+                            (msg_inner_width as usize).saturating_sub(indent.len())
+                        };
+                        let chunk_len = take.min(chars.len());
+                        let chunk: String = chars.drain(..chunk_len).collect();
+
+                        if first {
+                            msg_lines.push(Line::from(vec![
+                                Span::styled(format!("[{}] ", timestamp), Style::default().fg(Color::DarkGray)),
+                                Span::styled(format!("{}: ", sender_display), Style::default().fg(prefix_style)),
+                                Span::raw(chunk),
+                            ]));
+                            first = false;
+                        } else {
+                            msg_lines.push(Line::from(vec![
+                                Span::raw(indent.clone()),
+                                Span::raw(chunk),
+                            ]));
+                        }
                     }
                 }
             }
