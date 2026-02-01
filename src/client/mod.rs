@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage, MaybeTlsStream, WebSocketStream};
 
 use crate::crypto::{decrypt_message, encrypt_message, Identity};
@@ -59,29 +61,8 @@ impl ChatClient {
         mpsc::UnboundedReceiver<String>, // Status messages
         mpsc::UnboundedReceiver<HashMap<String, PeerInfo>>, // Peer updates
     )> {
-        let (ws_stream, _) = connect_async(&self.relay_url)
-            .await
-            .context("Failed to connect to relay")?;
-
-        let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-
-        // Send initial connect message
-        let connect_msg = Message::Connect {
-            session_id: self.session_id.clone(),
-        };
-        let data = bincode::serialize(&connect_msg)?;
-        ws_sender.send(WsMessage::Binary(data)).await?;
-
-        // Send key exchange immediately so any peer that connects can establish E2EE
-        let key_exchange_msg = Message::KeyExchange {
-            from: self.session_id.clone(),
-            public_key: self.identity.public_key_bytes(),
-        };
-        let ke_data = bincode::serialize(&key_exchange_msg)?;
-        ws_sender.send(WsMessage::Binary(ke_data)).await?;
-
-        // Channels for communication with TUI
-        let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<OutgoingMessage>();
+        // Channels for communication with TUI (persist across reconnects)
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel::<OutgoingMessage>();
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel::<PlainMessage>();
         let (status_tx, status_rx) = mpsc::unbounded_channel::<String>();
         let (peer_update_tx, peer_update_rx) = mpsc::unbounded_channel::<HashMap<String, PeerInfo>>();
@@ -90,223 +71,372 @@ impl ChatClient {
         let session_id = self.session_id.clone();
         let public_key_bytes = self.identity.public_key_bytes();
         let my_nickname = self.nickname.clone();
+        let relay_url = self.relay_url.clone();
         
-        // Track all peers
+        // Track all peers (persists across reconnects)
         let peers = std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::<String, PeerInfo>::new()));
-
-        // Spawn receiver task
-        let peers_recv = peers.clone();
-        let status_tx_recv = status_tx.clone();
-        let session_id_recv = session_id.clone();
-        let public_key_bytes_recv = public_key_bytes.clone();
-        let my_nickname_recv = my_nickname.clone();
-        let (ke_reply_tx, mut ke_reply_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (nickname_tx, mut nickname_rx) = mpsc::unbounded_channel::<(String, Vec<u8>)>();
         
-        tokio::spawn(async move {
-            while let Some(msg) = ws_receiver.next().await {
-                if let Ok(WsMessage::Binary(data)) = msg {
-                    if let Ok(message) = bincode::deserialize::<Message>(&data) {
-                        match message {
-                            Message::Ack => {
-                                let _ = status_tx_recv.send("Connected to relay".to_string());
-                            }
-                            Message::KeyExchange { from, public_key } => {
-                                if from == session_id_recv {
-                                    continue; // Ignore our own key exchange
-                                }
-                                
-                                // Perform key exchange
-                                match identity.key_exchange(&public_key) {
-                                    Ok(secret) => {
-                                        let mut peers_map = peers_recv.write().await;
-                                        let is_new_peer = !peers_map.contains_key(&from);
-                                        
-                                        peers_map.insert(from.clone(), PeerInfo {
-                                            shared_secret: secret.clone(),
-                                            nickname: None,
-                                        });
-                                        
-                                        let _ = status_tx_recv.send(format!("🔐 Encrypted session established with {}", &from[..12]));
-                                        
-                                        // Send peer update
-                                        let _ = peer_update_tx.send(peers_map.clone());
-                                        
-                                        // Show join notification
-                                        if is_new_peer {
-                                            let join_msg = PlainMessage::system(
-                                                from.clone(),
-                                                format!("{} has joined", &from[..12]),
-                                            );
-                                            let _ = incoming_tx.send(join_msg);
-                                        }
+        // Wrap receiver in Arc<Mutex> so it can be shared across reconnection attempts
+        let msg_rx = std::sync::Arc::new(tokio::sync::Mutex::new(msg_rx));
 
-                                        // Send our public key back so the peer can also complete the exchange
-                                        if is_new_peer {
-                                            let reply = Message::KeyExchange {
-                                                from: session_id_recv.clone(),
-                                                public_key: public_key_bytes_recv.clone(),
-                                            };
-                                            if let Ok(reply_data) = bincode::serialize(&reply) {
-                                                let _ = ke_reply_tx.send(reply_data);
-                                            }
-                                            
-                                            // Send our nickname after key exchange reply has been queued
-                                            // Use a delay to ensure the peer has processed the key exchange first
-                                            if let Some(ref nick) = my_nickname_recv {
-                                                let nick = nick.clone();
-                                                let session_id_nick = session_id_recv.clone();
-                                                let secret_nick = secret.clone();
-                                                let nickname_tx_clone = nickname_tx.clone();
-                                                let from_clone = from.clone();
-                                                tokio::spawn(async move {
-                                                    // Wait for key exchange to propagate
-                                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                                    let nickname_msg = PlainMessage::nickname(
-                                                        session_id_nick.clone(),
-                                                        nick,
-                                                    );
-                                                    if let Ok(serialized) = bincode::serialize(&nickname_msg) {
-                                                        if let Ok((nonce, ciphertext)) = encrypt_message(&secret_nick, &serialized) {
-                                                            let encrypted_msg = Message::Encrypted {
-                                                                from: session_id_nick,
-                                                                nonce,
-                                                                ciphertext,
-                                                            };
-                                                            if let Ok(data) = bincode::serialize(&encrypted_msg) {
-                                                                let _ = nickname_tx_clone.send((from_clone, data));
-                                                            }
-                                                        }
-                                                    }
-                                                });
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let _ = status_tx_recv.send(format!("❌ Key exchange failed: {}", e));
-                                    }
-                                }
-                            }
-                            Message::Encrypted { from, nonce, ciphertext } => {
-                                if from == session_id_recv {
-                                    continue; // Ignore our own messages
-                                }
-                                
-                                let peers_map = peers_recv.read().await;
-                                if let Some(peer_info) = peers_map.get(&from) {
-                                    match decrypt_message(&peer_info.shared_secret, &nonce, &ciphertext) {
-                                        Ok(plaintext) => {
-                                            if let Ok(plain_msg) = bincode::deserialize::<PlainMessage>(&plaintext) {
-                                                // Handle nickname updates
-                                                if plain_msg.system && plain_msg.nickname.is_some() {
-                                                    let new_nick = plain_msg.nickname.clone().unwrap();
-                                                    drop(peers_map); // Release read lock
-                                                    let mut peers_map = peers_recv.write().await;
-                                                    let old_nick = peers_map.get(&from).and_then(|p| p.nickname.clone());
-                                                    if let Some(peer) = peers_map.get_mut(&from) {
-                                                        peer.nickname = Some(new_nick.clone());
-                                                        let _ = peer_update_tx.send(peers_map.clone());
-                                                    }
-                                                    drop(peers_map);
-                                                    // Send visible notification about nickname
-                                                    let display = old_nick.unwrap_or_else(|| from[..12.min(from.len())].to_string());
-                                                    let notify = PlainMessage::system(
-                                                        from.clone(),
-                                                        format!("{} is now known as {}", display, new_nick),
-                                                    );
-                                                    let _ = incoming_tx.send(notify);
-                                                } else {
-                                                    let _ = incoming_tx.send(plain_msg);
-                                                }
-                                            }
-                                        }
-                                        Err(_) => {
-                                            // Silently drop failed decryptions (message wasn't for us)
-                                        }
-                                    }
-                                } else {
-                                    // No shared secret for this peer yet, silently drop
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        });
-
-        // Spawn sender task
-        let peers_send = peers.clone();
+        // Spawn reconnection loop
+        let peers_reconnect = peers.clone();
+        let status_tx_reconnect = status_tx.clone();
         tokio::spawn(async move {
+            let mut reconnect_delay = 1u64;
+            let mut attempt = 0u32;
+            
             loop {
-                tokio::select! {
-                    // Handle key exchange replies
-                    Some(ke_data) = ke_reply_rx.recv() => {
-                        let _ = ws_sender.send(WsMessage::Binary(ke_data)).await;
+                // Attempt connection
+                match Self::establish_connection(
+                    &relay_url,
+                    &session_id,
+                    &public_key_bytes,
+                    &identity,
+                    &my_nickname,
+                    peers_reconnect.clone(),
+                    msg_rx.clone(),
+                    incoming_tx.clone(),
+                    status_tx_reconnect.clone(),
+                    peer_update_tx.clone(),
+                    attempt,
+                ).await {
+                    Ok(_) => {
+                        // Connection ended gracefully, reset backoff
+                        reconnect_delay = 1;
+                        attempt = 0;
                     }
-                    // Handle nickname messages
-                    Some((_target, data)) = nickname_rx.recv() => {
-                        let _ = ws_sender.send(WsMessage::Binary(data)).await;
+                    Err(_e) => {
+                        attempt += 1;
+                        let _ = status_tx_reconnect.send(format!(
+                            "Connection lost, reconnecting (attempt {})...",
+                            attempt
+                        ));
+                        
+                        // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
+                        sleep(Duration::from_secs(reconnect_delay)).await;
+                        reconnect_delay = (reconnect_delay * 2).min(30);
                     }
-                    // Handle outgoing chat messages
-                    Some(outgoing) = msg_rx.recv() => {
-                        match outgoing {
-                            OutgoingMessage::Direct { target_id, message } => {
-                                // Send DM - encrypt with specific peer's key
-                                let peers_map = peers_send.read().await;
-                                if let Some(peer_info) = peers_map.get(&target_id) {
-                                    let serialized = bincode::serialize(&message).unwrap();
-                                    match encrypt_message(&peer_info.shared_secret, &serialized) {
-                                        Ok((nonce, ciphertext)) => {
-                                            let encrypted_msg = Message::Encrypted {
-                                                from: session_id.clone(),
-                                                nonce,
-                                                ciphertext,
-                                            };
-                                            let data = bincode::serialize(&encrypted_msg).unwrap();
-                                            let _ = ws_sender.send(WsMessage::Binary(data)).await;
-                                        }
-                                        Err(e) => {
-                                            let _ = status_tx.send(format!("❌ Encryption failed: {}", e));
-                                        }
-                                    }
-                                } else {
-                                    let _ = status_tx.send(format!("❌ No session with peer {}", &target_id[..12.min(target_id.len())]));
-                                }
-                            }
-                            OutgoingMessage::Global(message) => {
-                                // Send global message - encrypt once per peer
-                                let peers_map = peers_send.read().await;
-                                if peers_map.is_empty() {
-                                    let _ = status_tx.send("⚠️  No peers connected".to_string());
-                                } else {
-                                    for (peer_id, peer_info) in peers_map.iter() {
-                                        let serialized = bincode::serialize(&message).unwrap();
-                                        match encrypt_message(&peer_info.shared_secret, &serialized) {
-                                            Ok((nonce, ciphertext)) => {
-                                                let encrypted_msg = Message::Encrypted {
-                                                    from: session_id.clone(),
-                                                    nonce,
-                                                    ciphertext,
-                                                };
-                                                let data = bincode::serialize(&encrypted_msg).unwrap();
-                                                let _ = ws_sender.send(WsMessage::Binary(data)).await;
-                                            }
-                                            Err(e) => {
-                                                let _ = status_tx.send(format!("❌ Encryption failed for {}: {}", &peer_id[..12], e));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    else => break,
                 }
             }
         });
 
         Ok((msg_tx, incoming_rx, status_rx, peer_update_rx))
+    }
+
+    async fn establish_connection(
+        relay_url: &str,
+        session_id: &str,
+        public_key_bytes: &[u8],
+        identity: &Identity,
+        my_nickname: &Option<String>,
+        peers: std::sync::Arc<tokio::sync::RwLock<HashMap<String, PeerInfo>>>,
+        outgoing_rx: std::sync::Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<OutgoingMessage>>>,
+        incoming_tx: mpsc::UnboundedSender<PlainMessage>,
+        status_tx: mpsc::UnboundedSender<String>,
+        peer_update_tx: mpsc::UnboundedSender<HashMap<String, PeerInfo>>,
+        attempt: u32,
+    ) -> Result<()> {
+        // Connect to relay
+        let (ws_stream, _) = connect_async(relay_url)
+            .await
+            .context("Failed to connect to relay")?;
+
+        let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+
+        // Send connect message with same session_id (for session resumption)
+        let connect_msg = Message::Connect {
+            session_id: session_id.to_string(),
+        };
+        let data = bincode::serialize(&connect_msg)?;
+        ws_sender.send(WsMessage::Binary(data)).await?;
+
+        // Send key exchange to re-establish E2EE with all peers
+        let key_exchange_msg = Message::KeyExchange {
+            from: session_id.to_string(),
+            public_key: public_key_bytes.to_vec(),
+        };
+        let ke_data = bincode::serialize(&key_exchange_msg)?;
+        ws_sender.send(WsMessage::Binary(ke_data)).await?;
+
+        // Channels for internal communication
+        let (ke_reply_tx, mut ke_reply_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (nickname_tx, mut nickname_rx) = mpsc::unbounded_channel::<(String, Vec<u8>)>();
+        let (pong_tx, mut pong_rx) = mpsc::unbounded_channel::<()>();
+
+        // Channels for signaling connection failure
+        let (failure_tx, mut failure_rx) = mpsc::unbounded_channel::<String>();
+
+        // Spawn receiver task
+        let peers_recv = peers.clone();
+        let status_tx_recv = status_tx.clone();
+        let session_id_recv = session_id.to_string();
+        let public_key_bytes_recv = public_key_bytes.to_vec();
+        let my_nickname_recv = my_nickname.clone();
+        let identity_recv = identity.clone_for_thread();
+        let pong_tx_clone = pong_tx.clone();
+        let failure_tx_recv = failure_tx.clone();
+        
+        tokio::spawn(async move {
+            while let Some(msg) = ws_receiver.next().await {
+                match msg {
+                    Ok(WsMessage::Binary(data)) => {
+                        if let Ok(message) = bincode::deserialize::<Message>(&data) {
+                            match message {
+                                Message::Ack => {
+                                    if attempt == 0 {
+                                        let _ = status_tx_recv.send("Connected to relay".to_string());
+                                    } else {
+                                        let _ = status_tx_recv.send("Reconnected".to_string());
+                                    }
+                                }
+                                Message::KeyExchange { from, public_key } => {
+                                    if from == session_id_recv {
+                                        continue; // Ignore our own key exchange
+                                    }
+                                    
+                                    // Perform key exchange
+                                    match identity_recv.key_exchange(&public_key) {
+                                        Ok(secret) => {
+                                            let mut peers_map = peers_recv.write().await;
+                                            let is_new_peer = !peers_map.contains_key(&from);
+                                            
+                                            peers_map.insert(from.clone(), PeerInfo {
+                                                shared_secret: secret.clone(),
+                                                nickname: None,
+                                            });
+                                            
+                                            let _ = status_tx_recv.send(format!("🔐 Encrypted session established with {}", &from[..12]));
+                                            
+                                            // Send peer update
+                                            let _ = peer_update_tx.send(peers_map.clone());
+                                            
+                                            // Show join notification
+                                            if is_new_peer {
+                                                let join_msg = PlainMessage::system(
+                                                    from.clone(),
+                                                    format!("{} has joined", &from[..12]),
+                                                );
+                                                let _ = incoming_tx.send(join_msg);
+                                            }
+
+                                            // Send our public key back so the peer can also complete the exchange
+                                            if is_new_peer {
+                                                let reply = Message::KeyExchange {
+                                                    from: session_id_recv.clone(),
+                                                    public_key: public_key_bytes_recv.clone(),
+                                                };
+                                                if let Ok(reply_data) = bincode::serialize(&reply) {
+                                                    let _ = ke_reply_tx.send(reply_data);
+                                                }
+                                                
+                                                // Send our nickname after key exchange
+                                                if let Some(ref nick) = my_nickname_recv {
+                                                    let nick = nick.clone();
+                                                    let session_id_nick = session_id_recv.clone();
+                                                    let secret_nick = secret.clone();
+                                                    let nickname_tx_clone = nickname_tx.clone();
+                                                    let from_clone = from.clone();
+                                                    tokio::spawn(async move {
+                                                        tokio::time::sleep(Duration::from_millis(500)).await;
+                                                        let nickname_msg = PlainMessage::nickname(
+                                                            session_id_nick.clone(),
+                                                            nick,
+                                                        );
+                                                        if let Ok(serialized) = bincode::serialize(&nickname_msg) {
+                                                            if let Ok((nonce, ciphertext)) = encrypt_message(&secret_nick, &serialized) {
+                                                                let encrypted_msg = Message::Encrypted {
+                                                                    from: session_id_nick,
+                                                                    nonce,
+                                                                    ciphertext,
+                                                                };
+                                                                if let Ok(data) = bincode::serialize(&encrypted_msg) {
+                                                                    let _ = nickname_tx_clone.send((from_clone, data));
+                                                                }
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let _ = status_tx_recv.send(format!("❌ Key exchange failed: {}", e));
+                                        }
+                                    }
+                                }
+                                Message::Encrypted { from, nonce, ciphertext } => {
+                                    if from == session_id_recv {
+                                        continue; // Ignore our own messages
+                                    }
+                                    
+                                    let peers_map = peers_recv.read().await;
+                                    if let Some(peer_info) = peers_map.get(&from) {
+                                        match decrypt_message(&peer_info.shared_secret, &nonce, &ciphertext) {
+                                            Ok(plaintext) => {
+                                                if let Ok(plain_msg) = bincode::deserialize::<PlainMessage>(&plaintext) {
+                                                    // Handle nickname updates
+                                                    if plain_msg.system && plain_msg.nickname.is_some() {
+                                                        let new_nick = plain_msg.nickname.clone().unwrap();
+                                                        drop(peers_map);
+                                                        let mut peers_map = peers_recv.write().await;
+                                                        let old_nick = peers_map.get(&from).and_then(|p| p.nickname.clone());
+                                                        if let Some(peer) = peers_map.get_mut(&from) {
+                                                            peer.nickname = Some(new_nick.clone());
+                                                            let _ = peer_update_tx.send(peers_map.clone());
+                                                        }
+                                                        drop(peers_map);
+                                                        let display = old_nick.unwrap_or_else(|| from[..12.min(from.len())].to_string());
+                                                        let notify = PlainMessage::system(
+                                                            from.clone(),
+                                                            format!("{} is now known as {}", display, new_nick),
+                                                        );
+                                                        let _ = incoming_tx.send(notify);
+                                                    } else {
+                                                        let _ = incoming_tx.send(plain_msg);
+                                                    }
+                                                }
+                                            }
+                                            Err(_) => {
+                                                // Silently drop failed decryptions
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Ok(WsMessage::Pong(_)) => {
+                        // Pong received
+                        let _ = pong_tx_clone.send(());
+                    }
+                    Ok(WsMessage::Close(_)) | Err(_) => {
+                        let _ = failure_tx_recv.send("Connection closed".to_string());
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let _ = failure_tx_recv.send("Receiver stream ended".to_string());
+        });
+
+        // Spawn sender task
+        let peers_send = peers.clone();
+        let session_id_send = session_id.to_string();
+        let status_tx_send = status_tx.clone();
+        let failure_tx_send = failure_tx.clone();
+        let outgoing_rx_clone = outgoing_rx.clone();
+        
+        tokio::spawn(async move {
+            // Send ping every 30 seconds, expect pong within 10 seconds
+            let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+            let mut pending_pong = false;
+            let mut pong_deadline = tokio::time::Instant::now();
+            
+            loop {
+                // Check if pong deadline exceeded
+                if pending_pong && tokio::time::Instant::now() > pong_deadline {
+                    let _ = failure_tx_send.send("Pong timeout".to_string());
+                    break;
+                }
+                
+                // Lock the receiver before select!
+                let mut outgoing_locked = outgoing_rx_clone.lock().await;
+                
+                tokio::select! {
+                    _ = ping_interval.tick() => {
+                        // Send WebSocket Ping
+                        if ws_sender.send(WsMessage::Ping(vec![])).await.is_err() {
+                            let _ = failure_tx_send.send("Failed to send ping".to_string());
+                            break;
+                        }
+                        pending_pong = true;
+                        pong_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                    }
+                    Some(_) = pong_rx.recv() => {
+                        // Pong received
+                        pending_pong = false;
+                    }
+                    Some(ke_data) = ke_reply_rx.recv() => {
+                        if ws_sender.send(WsMessage::Binary(ke_data)).await.is_err() {
+                            let _ = failure_tx_send.send("Send failed".to_string());
+                            break;
+                        }
+                    }
+                    Some((_target, data)) = nickname_rx.recv() => {
+                        if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
+                            let _ = failure_tx_send.send("Send failed".to_string());
+                            break;
+                        }
+                    }
+                    outgoing = outgoing_locked.recv() => {
+                        if let Some(outgoing) = outgoing {
+                            match outgoing {
+                                OutgoingMessage::Direct { target_id, message } => {
+                                    let peers_map = peers_send.read().await;
+                                    if let Some(peer_info) = peers_map.get(&target_id) {
+                                        let serialized = bincode::serialize(&message).unwrap();
+                                        match encrypt_message(&peer_info.shared_secret, &serialized) {
+                                            Ok((nonce, ciphertext)) => {
+                                                let encrypted_msg = Message::Encrypted {
+                                                    from: session_id_send.clone(),
+                                                    nonce,
+                                                    ciphertext,
+                                                };
+                                                let data = bincode::serialize(&encrypted_msg).unwrap();
+                                                if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
+                                                    let _ = failure_tx_send.send("Send failed".to_string());
+                                                    break;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                let _ = status_tx_send.send(format!("❌ Encryption failed: {}", e));
+                                            }
+                                        }
+                                    } else {
+                                        let _ = status_tx_send.send(format!("❌ No session with peer {}", &target_id[..12.min(target_id.len())]));
+                                    }
+                                }
+                                OutgoingMessage::Global(message) => {
+                                    let peers_map = peers_send.read().await;
+                                    if peers_map.is_empty() {
+                                        let _ = status_tx_send.send("⚠️  No peers connected".to_string());
+                                    } else {
+                                        for (peer_id, peer_info) in peers_map.iter() {
+                                            let serialized = bincode::serialize(&message).unwrap();
+                                            match encrypt_message(&peer_info.shared_secret, &serialized) {
+                                                Ok((nonce, ciphertext)) => {
+                                                    let encrypted_msg = Message::Encrypted {
+                                                        from: session_id_send.clone(),
+                                                        nonce,
+                                                        ciphertext,
+                                                    };
+                                                    let data = bincode::serialize(&encrypted_msg).unwrap();
+                                                    if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
+                                                        let _ = failure_tx_send.send("Send failed".to_string());
+                                                        break;
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    let _ = status_tx_send.send(format!("❌ Encryption failed for {}: {}", &peer_id[..12], e));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // Wait for connection failure signal
+        if let Some(reason) = failure_rx.recv().await {
+            Err(anyhow::anyhow!("Connection lost: {}", reason))
+        } else {
+            Err(anyhow::anyhow!("Connection lost"))
+        }
     }
 
     pub async fn initiate_handshake(

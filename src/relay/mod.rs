@@ -77,9 +77,21 @@ async fn handle_connection(stream: TcpStream, peers: PeerMap) -> Result<()> {
 
                 match message {
                     Message::Connect { session_id: sid } => {
-                        // Register this peer
-                        session_id = Some(sid.clone());
-                        peers.write().await.insert(sid, tx.clone());
+                        // Register or update this peer (session resumption)
+                        let mut peers_write = peers.write().await;
+                        let is_resumption = peers_write.contains_key(&sid);
+                        
+                        if is_resumption {
+                            println!("🔄 Session resumption: {}", &sid[..12]);
+                        } else {
+                            println!("🆕 New session: {}", &sid[..12]);
+                        }
+                        
+                        // Insert/replace the sender channel
+                        peers_write.insert(sid.clone(), tx.clone());
+                        drop(peers_write);
+                        
+                        session_id = Some(sid);
                         
                         // Send ACK
                         let ack = bincode::serialize(&Message::Ack)?;
