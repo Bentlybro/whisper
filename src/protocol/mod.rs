@@ -27,6 +27,8 @@ pub struct PlainMessage {
     pub timestamp: i64,
     pub sender: String,
     pub content: String,
+    #[serde(default)]
+    pub system: bool,
 }
 
 impl PlainMessage {
@@ -35,6 +37,16 @@ impl PlainMessage {
             timestamp: chrono::Utc::now().timestamp(),
             sender,
             content,
+            system: false,
+        }
+    }
+
+    pub fn system(sender: String, content: String) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().timestamp(),
+            sender,
+            content,
+            system: true,
         }
     }
 }

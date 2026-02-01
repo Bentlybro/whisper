@@ -100,6 +100,15 @@ impl ChatClient {
                                         *peer_id_recv.write().await = Some(from.clone());
                                         let _ = status_tx_recv.send(format!("🔐 Encrypted session established with {}", &from[..12]));
 
+                                        // Show join notification
+                                        if !already_had_secret {
+                                            let join_msg = PlainMessage::system(
+                                                from.clone(),
+                                                format!("{} has joined", &from[..12]),
+                                            );
+                                            let _ = incoming_tx.send(join_msg);
+                                        }
+
                                         // Send our public key back so the peer can also complete the exchange
                                         if !already_had_secret {
                                             let reply = Message::KeyExchange {
@@ -135,6 +144,15 @@ impl ChatClient {
                         }
                     }
                 }
+            }
+            // Peer disconnected - show leave message
+            let peer = peer_id_recv.read().await.clone();
+            if let Some(pid) = peer {
+                let leave_msg = PlainMessage::system(
+                    pid.clone(),
+                    format!("{} has left", &pid[..12.min(pid.len())]),
+                );
+                let _ = incoming_tx.send(leave_msg);
             }
         });
 
