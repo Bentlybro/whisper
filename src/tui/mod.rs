@@ -188,6 +188,10 @@ impl ChatUI {
                             KeyCode::Enter => {
                                 if !self.input.is_empty() {
                                     let text: String = self.input.iter().collect();
+                                    // Debug: show raw input in status
+                                    let first_chars: String = text.chars().take(30).collect();
+                                    let starts_slash = text.trim().starts_with('/');
+                                    self.status = format!("INPUT[{}]: '{}' slash={}", text.len(), first_chars, starts_slash);
                                     self.handle_input(text, msg_tx);
                                     self.input.clear();
                                     self.cursor = 0;
