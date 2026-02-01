@@ -14,15 +14,40 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use std::io;
+use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 use crate::client::{OutgoingMessage, PeerInfo};
-use crate::protocol::PlainMessage;
+use crate::protocol::{PlainMessage, FileOffer, FileChunk};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Tab {
     Global,
     DirectMessage(String), // peer_id
+}
+
+#[derive(Clone, Debug)]
+struct PendingFileOffer {
+    offer: FileOffer,
+    from_peer: String,
+    tab: Tab,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveTransfer {
+    offer: FileOffer,
+    chunks_received: Vec<Option<Vec<u8>>>,
+    save_path: PathBuf,
+    chunks_done: u32,
+}
+
+#[derive(Clone, Debug)]
+struct OutgoingTransfer {
+    offer: FileOffer,
+    file_data: Vec<u8>,
+    target_peer: String,
+    chunks_sent: u32,
+    is_direct: bool,
 }
 
 pub struct ChatUI {
@@ -35,6 +60,9 @@ pub struct ChatUI {
     peers: HashMap<String, PeerInfo>,
     own_id: String,
     own_nickname: Option<String>,
+    pending_offers: HashMap<String, PendingFileOffer>,
+    active_transfers: HashMap<String, ActiveTransfer>,
+    outgoing_transfers: HashMap<String, OutgoingTransfer>,
 }
 
 impl ChatUI {
@@ -52,6 +80,9 @@ impl ChatUI {
             peers: HashMap::new(),
             own_id,
             own_nickname: nickname,
+            pending_offers: HashMap::new(),
+            active_transfers: HashMap::new(),
+            outgoing_transfers: HashMap::new(),
         }
     }
 
@@ -171,6 +202,18 @@ impl ChatUI {
 
             // Check for incoming messages
             while let Ok(msg) = incoming_rx.try_recv() {
+                // Handle file-related messages
+                if msg.file_offer.is_some() {
+                    self.handle_file_offer(msg.clone());
+                    continue;
+                } else if msg.file_chunk.is_some() {
+                    self.handle_file_chunk(msg.clone());
+                    continue;
+                } else if let Some(accept) = msg.file_response {
+                    self.handle_file_response(msg.clone(), accept, msg_tx);
+                    continue;
+                }
+                
                 if msg.dm_request {
                     // Peer wants to open a DM — create the tab silently
                     let sender_id = msg.sender.clone();
@@ -258,6 +301,25 @@ impl ChatUI {
                     }
                     
                     self.status = format!("Nickname changed to: {}", new_nick);
+                }
+                "share" => {
+                    if parts.len() < 2 {
+                        self.status = "Usage: /share <filepath>".to_string();
+                        return;
+                    }
+                    let filepath = parts[1..].join(" ");
+                    self.handle_share_command(&filepath, msg_tx);
+                }
+                "accept" => {
+                    let save_path = if parts.len() >= 2 {
+                        parts[1..].join(" ")
+                    } else {
+                        ".".to_string()
+                    };
+                    self.handle_accept_command(&save_path, msg_tx);
+                }
+                "reject" => {
+                    self.handle_reject_command(msg_tx);
                 }
                 _ => {
                     self.status = format!("Unknown command: /{}", parts[0]);
@@ -644,6 +706,348 @@ impl ChatUI {
                 let name = self.get_peer_display_name(peer_id);
                 name
             }
+        }
+    }
+
+    // File sharing methods
+    
+    fn handle_share_command(&mut self, filepath: &str, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        const CHUNK_SIZE: usize = 65536; // 64KB
+        
+        // Expand tilde in path
+        let path = if filepath.starts_with("~/") {
+            if let Some(home) = std::env::var_os("HOME") {
+                PathBuf::from(home).join(&filepath[2..])
+            } else {
+                PathBuf::from(filepath)
+            }
+        } else {
+            PathBuf::from(filepath)
+        };
+        
+        // Read file
+        let file_data = match std::fs::read(&path) {
+            Ok(data) => data,
+            Err(e) => {
+                self.status = format!("Failed to read file: {}", e);
+                return;
+            }
+        };
+        
+        // Get filename only (no path)
+        let filename = match path.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => {
+                self.status = "Invalid file path".to_string();
+                return;
+            }
+        };
+        
+        // Compute Blake3 hash
+        let checksum = blake3::hash(&file_data).to_hex().to_string();
+        
+        // Calculate chunks
+        let total_chunks = ((file_data.len() + CHUNK_SIZE - 1) / CHUNK_SIZE) as u32;
+        
+        // Generate random file ID
+        let file_id = format!("{:x}", rand::random::<u64>());
+        
+        let offer = FileOffer {
+            file_id: file_id.clone(),
+            filename: filename.clone(),
+            size: file_data.len() as u64,
+            checksum,
+            total_chunks,
+        };
+        
+        // Determine if this is a direct message or global
+        let current_tab = &self.tabs[self.active_tab];
+        let (is_direct, target_peer) = match current_tab {
+            Tab::Global => (false, String::new()),
+            Tab::DirectMessage(peer_id) => (true, peer_id.clone()),
+        };
+        
+        // Send offer
+        let offer_msg = PlainMessage::file_offer(self.own_id.clone(), offer.clone(), is_direct);
+        
+        if is_direct {
+            let _ = msg_tx.send(OutgoingMessage::Direct {
+                target_id: target_peer.clone(),
+                message: offer_msg,
+            });
+        } else {
+            let _ = msg_tx.send(OutgoingMessage::Global(offer_msg));
+        }
+        
+        // Store outgoing transfer
+        self.outgoing_transfers.insert(file_id.clone(), OutgoingTransfer {
+            offer: offer.clone(),
+            file_data,
+            target_peer,
+            chunks_sent: 0,
+            is_direct,
+        });
+        
+        self.status = format!("Offering file: {} ({})", filename, Self::format_size(offer.size));
+    }
+    
+    fn handle_accept_command(&mut self, save_path: &str, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        // Find pending offer for current tab
+        let current_tab = &self.tabs[self.active_tab];
+        
+        let offer_to_accept = self.pending_offers.iter()
+            .find(|(_, pending)| &pending.tab == current_tab)
+            .map(|(id, pending)| (id.clone(), pending.clone()));
+        
+        if let Some((file_id, pending)) = offer_to_accept {
+            // Expand path
+            let save_dir = if save_path.starts_with("~/") {
+                if let Some(home) = std::env::var_os("HOME") {
+                    PathBuf::from(home).join(&save_path[2..])
+                } else {
+                    PathBuf::from(save_path)
+                }
+            } else {
+                PathBuf::from(save_path)
+            };
+            
+            // Create full path
+            let full_path = if save_dir.is_dir() || save_path.ends_with('/') || save_path == "." {
+                save_dir.join(&pending.offer.filename)
+            } else {
+                save_dir
+            };
+            
+            // Send acceptance
+            let response_msg = PlainMessage::file_response(
+                self.own_id.clone(),
+                file_id.clone(),
+                true,
+                pending.tab != Tab::Global,
+            );
+            
+            match &pending.tab {
+                Tab::Global => {
+                    let _ = msg_tx.send(OutgoingMessage::Global(response_msg));
+                }
+                Tab::DirectMessage(peer_id) => {
+                    let _ = msg_tx.send(OutgoingMessage::Direct {
+                        target_id: peer_id.clone(),
+                        message: response_msg,
+                    });
+                }
+            }
+            
+            // Prepare to receive
+            let chunks_vec = vec![None; pending.offer.total_chunks as usize];
+            self.active_transfers.insert(file_id.clone(), ActiveTransfer {
+                offer: pending.offer.clone(),
+                chunks_received: chunks_vec,
+                save_path: full_path.clone(),
+                chunks_done: 0,
+            });
+            
+            self.pending_offers.remove(&file_id);
+            self.status = format!("Accepting {}, saving to {}", pending.offer.filename, full_path.display());
+        } else {
+            self.status = "No pending file offer in this tab".to_string();
+        }
+    }
+    
+    fn handle_reject_command(&mut self, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        let current_tab = &self.tabs[self.active_tab];
+        
+        let offer_to_reject = self.pending_offers.iter()
+            .find(|(_, pending)| &pending.tab == current_tab)
+            .map(|(id, pending)| (id.clone(), pending.clone()));
+        
+        if let Some((file_id, pending)) = offer_to_reject {
+            // Send rejection
+            let response_msg = PlainMessage::file_response(
+                self.own_id.clone(),
+                file_id.clone(),
+                false,
+                pending.tab != Tab::Global,
+            );
+            
+            match &pending.tab {
+                Tab::Global => {
+                    let _ = msg_tx.send(OutgoingMessage::Global(response_msg));
+                }
+                Tab::DirectMessage(peer_id) => {
+                    let _ = msg_tx.send(OutgoingMessage::Direct {
+                        target_id: peer_id.clone(),
+                        message: response_msg,
+                    });
+                }
+            }
+            
+            self.pending_offers.remove(&file_id);
+            self.status = format!("Rejected file: {}", pending.offer.filename);
+        } else {
+            self.status = "No pending file offer in this tab".to_string();
+        }
+    }
+    
+    fn handle_file_offer(&mut self, msg: PlainMessage) {
+        if let Some(offer) = msg.file_offer {
+            let file_id = offer.file_id.clone();
+            let sender_name = self.get_peer_display_name(&msg.sender);
+            
+            // Determine which tab this belongs to
+            let tab = if msg.direct {
+                Tab::DirectMessage(msg.sender.clone())
+            } else {
+                Tab::Global
+            };
+            
+            // Store pending offer
+            self.pending_offers.insert(file_id, PendingFileOffer {
+                offer: offer.clone(),
+                from_peer: msg.sender,
+                tab,
+            });
+            
+            self.status = format!(
+                "{} wants to share {} ({}) — /accept [path] or /reject",
+                sender_name,
+                offer.filename,
+                Self::format_size(offer.size)
+            );
+        }
+    }
+    
+    fn handle_file_chunk(&mut self, msg: PlainMessage) {
+        if let Some(chunk) = msg.file_chunk {
+            let file_id = &chunk.file_id;
+            
+            if let Some(transfer) = self.active_transfers.get_mut(file_id) {
+                // Store chunk
+                if (chunk.index as usize) < transfer.chunks_received.len() {
+                    if transfer.chunks_received[chunk.index as usize].is_none() {
+                        transfer.chunks_received[chunk.index as usize] = Some(chunk.data);
+                        transfer.chunks_done += 1;
+                        
+                        let progress = (transfer.chunks_done as f64 / transfer.offer.total_chunks as f64) * 100.0;
+                        self.status = format!(
+                            "Receiving {}: {:.0}% ({}/{})",
+                            transfer.offer.filename,
+                            progress,
+                            transfer.chunks_done,
+                            transfer.offer.total_chunks
+                        );
+                        
+                        // Check if complete
+                        if transfer.chunks_done == transfer.offer.total_chunks {
+                            self.finalize_transfer(file_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    fn handle_file_response(&mut self, msg: PlainMessage, accept: bool, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        const CHUNK_SIZE: usize = 65536;
+        let file_id = &msg.content;
+        
+        if !accept {
+            // File was rejected
+            if let Some(transfer) = self.outgoing_transfers.remove(file_id) {
+                self.status = format!("File rejected: {}", transfer.offer.filename);
+            }
+            return;
+        }
+        
+        // File was accepted - start sending chunks
+        let sender_name = self.get_peer_display_name(&msg.sender);
+        if let Some(transfer) = self.outgoing_transfers.get_mut(file_id) {
+            self.status = format!("{} accepted {}. Sending...", sender_name, transfer.offer.filename);
+            
+            // Send all chunks
+            let total_chunks = transfer.offer.total_chunks as usize;
+            for i in 0..total_chunks {
+                let start = i * CHUNK_SIZE;
+                let end = ((i + 1) * CHUNK_SIZE).min(transfer.file_data.len());
+                let chunk_data = transfer.file_data[start..end].to_vec();
+                
+                let chunk = FileChunk {
+                    file_id: file_id.clone(),
+                    index: i as u32,
+                    data: chunk_data,
+                };
+                
+                let chunk_msg = PlainMessage::file_chunk(
+                    self.own_id.clone(),
+                    chunk,
+                    transfer.is_direct,
+                );
+                
+                if transfer.is_direct {
+                    let _ = msg_tx.send(OutgoingMessage::Direct {
+                        target_id: transfer.target_peer.clone(),
+                        message: chunk_msg,
+                    });
+                } else {
+                    let _ = msg_tx.send(OutgoingMessage::Global(chunk_msg));
+                }
+                
+                transfer.chunks_sent += 1;
+            }
+            
+            let filename = transfer.offer.filename.clone();
+            self.outgoing_transfers.remove(file_id);
+            self.status = format!("Sent {} successfully", filename);
+        }
+    }
+    
+    fn finalize_transfer(&mut self, file_id: &str) {
+        if let Some(transfer) = self.active_transfers.remove(file_id) {
+            // Reassemble file
+            let mut file_data = Vec::new();
+            for chunk_opt in &transfer.chunks_received {
+                if let Some(chunk) = chunk_opt {
+                    file_data.extend_from_slice(chunk);
+                } else {
+                    self.status = format!("Error: Missing chunks for {}", transfer.offer.filename);
+                    return;
+                }
+            }
+            
+            // Verify checksum
+            let actual_checksum = blake3::hash(&file_data).to_hex().to_string();
+            if actual_checksum != transfer.offer.checksum {
+                self.status = format!("Error: Checksum mismatch for {}", transfer.offer.filename);
+                return;
+            }
+            
+            // Write file
+            if let Err(e) = std::fs::write(&transfer.save_path, &file_data) {
+                self.status = format!("Error saving file: {}", e);
+                return;
+            }
+            
+            self.status = format!(
+                "File saved: {} ✓ ({})",
+                transfer.save_path.display(),
+                Self::format_size(transfer.offer.size)
+            );
+        }
+    }
+    
+    fn format_size(bytes: u64) -> String {
+        const KB: u64 = 1024;
+        const MB: u64 = KB * 1024;
+        const GB: u64 = MB * 1024;
+        
+        if bytes >= GB {
+            format!("{:.2} GB", bytes as f64 / GB as f64)
+        } else if bytes >= MB {
+            format!("{:.2} MB", bytes as f64 / MB as f64)
+        } else if bytes >= KB {
+            format!("{:.2} KB", bytes as f64 / KB as f64)
+        } else {
+            format!("{} bytes", bytes)
         }
     }
 }

@@ -21,6 +21,24 @@ pub enum Message {
     Error { message: String },
 }
 
+/// File offer metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileOffer {
+    pub file_id: String,      // Random ID for this transfer
+    pub filename: String,     // Original filename only (no path!)
+    pub size: u64,            // Total size in bytes
+    pub checksum: String,     // Blake3 hash of full file
+    pub total_chunks: u32,    // Number of chunks
+}
+
+/// File chunk data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChunk {
+    pub file_id: String,      // Matches the offer
+    pub index: u32,           // Chunk index (0-based)
+    pub data: Vec<u8>,        // Chunk data (base64 in serde)
+}
+
 /// Plaintext message format (before encryption)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlainMessage {
@@ -37,6 +55,15 @@ pub struct PlainMessage {
     /// Whether this is a DM open request (peer should open a DM tab)
     #[serde(default)]
     pub dm_request: bool,
+    /// File offer metadata
+    #[serde(default)]
+    pub file_offer: Option<FileOffer>,
+    /// File chunk data
+    #[serde(default)]
+    pub file_chunk: Option<FileChunk>,
+    /// File response (true = accept, false = reject)
+    #[serde(default)]
+    pub file_response: Option<bool>,
 }
 
 impl PlainMessage {
@@ -49,6 +76,9 @@ impl PlainMessage {
             nickname: None,
             direct: false,
             dm_request: false,
+            file_offer: None,
+            file_chunk: None,
+            file_response: None,
         }
     }
 
@@ -61,6 +91,9 @@ impl PlainMessage {
             nickname: None,
             direct: true,
             dm_request: false,
+            file_offer: None,
+            file_chunk: None,
+            file_response: None,
         }
     }
 
@@ -73,6 +106,9 @@ impl PlainMessage {
             nickname: None,
             direct: false,
             dm_request: false,
+            file_offer: None,
+            file_chunk: None,
+            file_response: None,
         }
     }
 
@@ -85,6 +121,9 @@ impl PlainMessage {
             nickname: Some(nickname),
             direct: false,
             dm_request: false,
+            file_offer: None,
+            file_chunk: None,
+            file_response: None,
         }
     }
 
@@ -97,6 +136,54 @@ impl PlainMessage {
             nickname: None,
             direct: true,
             dm_request: true,
+            file_offer: None,
+            file_chunk: None,
+            file_response: None,
+        }
+    }
+
+    pub fn file_offer(sender: String, offer: FileOffer, direct: bool) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().timestamp(),
+            sender,
+            content: String::new(),
+            system: false,
+            nickname: None,
+            direct,
+            dm_request: false,
+            file_offer: Some(offer),
+            file_chunk: None,
+            file_response: None,
+        }
+    }
+
+    pub fn file_chunk(sender: String, chunk: FileChunk, direct: bool) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().timestamp(),
+            sender,
+            content: String::new(),
+            system: false,
+            nickname: None,
+            direct,
+            dm_request: false,
+            file_offer: None,
+            file_chunk: Some(chunk),
+            file_response: None,
+        }
+    }
+
+    pub fn file_response(sender: String, file_id: String, accept: bool, direct: bool) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().timestamp(),
+            sender,
+            content: file_id,
+            system: false,
+            nickname: None,
+            direct,
+            dm_request: false,
+            file_offer: None,
+            file_chunk: None,
+            file_response: Some(accept),
         }
     }
 }
