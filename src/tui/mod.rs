@@ -180,9 +180,8 @@ impl ChatUI {
                             KeyCode::End => {
                                 self.cursor = self.input.len();
                             }
-                            KeyCode::Enter if key.modifiers.contains(event::KeyModifiers::SHIFT) 
-                                || key.modifiers.contains(event::KeyModifiers::ALT) => {
-                                // Shift+Enter or Alt+Enter inserts a newline
+                            KeyCode::Enter if key.modifiers.contains(event::KeyModifiers::SHIFT) => {
+                                // Shift+Enter inserts a newline
                                 self.input.insert(self.cursor, '\n');
                                 self.cursor += 1;
                             }
