@@ -265,11 +265,15 @@ impl ChatUI {
 
     fn handle_input(&mut self, text: String, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
         // Handle commands
-        if text.starts_with('/') {
-            let parts: Vec<&str> = text[1..].split_whitespace().collect();
+        let trimmed = text.trim();
+        if trimmed.starts_with('/') {
+            let parts: Vec<&str> = trimmed[1..].split_whitespace().collect();
             if parts.is_empty() {
+                self.status = "Empty command".to_string();
                 return;
             }
+            
+            self.status = format!("Command: /{} ({})", parts[0], parts.len());
 
             match parts[0] {
                 "dm" => {
@@ -302,9 +306,9 @@ impl ChatUI {
                     
                     self.status = format!("Nickname changed to: {}", new_nick);
                 }
-                "share" => {
+                "send" | "share" => {
                     if parts.len() < 2 {
-                        self.status = "Usage: /share <filepath>".to_string();
+                        self.status = "Usage: /send <filepath>".to_string();
                         return;
                     }
                     let filepath = parts[1..].join(" ");
