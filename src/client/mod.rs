@@ -211,10 +211,17 @@ impl ChatClient {
                                             let mut peers_map = peers_recv.write().await;
                                             let is_new_peer = !peers_map.contains_key(&from);
                                             
-                                            peers_map.insert(from.clone(), PeerInfo {
-                                                shared_secret: secret.clone(),
-                                                nickname: None,
-                                            });
+                                            if is_new_peer {
+                                                peers_map.insert(from.clone(), PeerInfo {
+                                                    shared_secret: secret.clone(),
+                                                    nickname: None,
+                                                });
+                                            } else {
+                                                // Update shared secret but preserve nickname
+                                                if let Some(peer) = peers_map.get_mut(&from) {
+                                                    peer.shared_secret = secret.clone();
+                                                }
+                                            }
                                             
                                             let _ = status_tx_recv.send(format!("🔐 Encrypted session established with {}", &from[..12]));
                                             
