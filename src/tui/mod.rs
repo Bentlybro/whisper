@@ -903,13 +903,12 @@ impl ChatUI {
                 }
             };
             let duration = chrono::Utc::now() - call.start_time;
-            let mins = duration.num_minutes();
-            let secs = duration.num_seconds() % 60;
+            let duration_str = format_duration(duration);
             let mute_icon = if call.muted { "🔇" } else { "🔊" };
             let mute_hint = if call.muted { " [MUTED]" } else { "" };
             header_line2.push(Span::raw(" | "));
             header_line2.push(Span::styled(
-                format!("{} {} ({}:{:02}){}", mute_icon, call_label, mins, secs, mute_hint),
+                format!("{} {} ({}){}", mute_icon, call_label, duration_str, mute_hint),
                 Style::default().fg(if call.muted { Color::Red } else { Color::Green }).add_modifier(Modifier::BOLD),
             ));
         }
@@ -1477,8 +1476,7 @@ impl ChatUI {
 
     fn stop_audio_call(&mut self, call: &CallState) {
         let duration = chrono::Utc::now() - call.start_time;
-        let mins = duration.num_minutes();
-        let secs = duration.num_seconds() % 60;
+        let duration_str = format_duration(duration);
 
         // Stop audio pipeline
         if let Some(ref pipeline) = self.audio_pipeline {
@@ -1490,12 +1488,12 @@ impl ChatUI {
         match &call.call_type {
             CallType::Direct(peer_id) => {
                 let peer_name = self.get_peer_display_name(peer_id);
-                self.status = format!("Call with {} ended ({}:{:02})", peer_name, mins, secs);
+                self.status = format!("Call with {} ended ({})", peer_name, duration_str);
 
                 let dm_tab = Tab::DirectMessage(peer_id.clone());
                 let sys_msg = PlainMessage::system(
                     self.own_id.clone(),
-                    format!("📵 Call ended with {} ({}:{:02})", peer_name, mins, secs),
+                    format!("📵 Call ended with {} ({})", peer_name, duration_str),
                 );
                 self.messages.entry(dm_tab).or_insert_with(Vec::new).push(sys_msg);
             }
@@ -1503,12 +1501,12 @@ impl ChatUI {
                 let group_name = self.groups.get(group_id)
                     .map(|g| g.name.clone())
                     .unwrap_or_else(|| "Group".to_string());
-                self.status = format!("Left group call in {} ({}:{:02})", group_name, mins, secs);
+                self.status = format!("Left group call in {} ({})", group_name, duration_str);
 
                 let group_tab = Tab::Group(group_id.clone());
                 let sys_msg = PlainMessage::system(
                     self.own_id.clone(),
-                    format!("📵 Left group call in {} ({}:{:02})", group_name, mins, secs),
+                    format!("📵 Left group call in {} ({})", group_name, duration_str),
                 );
                 self.messages.entry(group_tab).or_insert_with(Vec::new).push(sys_msg);
             }
@@ -1933,4 +1931,21 @@ fn generate_group_id() -> String {
     use rand::Rng;
     let random_bytes: Vec<u8> = (0..16).map(|_| rand::thread_rng().gen()).collect();
     hex::encode(random_bytes)
+}
+
+/// Format a duration smartly: "1:23" for under an hour, "2:45:03" for hours, "1d 3:20:15" for days
+fn format_duration(duration: chrono::Duration) -> String {
+    let total_secs = duration.num_seconds();
+    let days = total_secs / 86400;
+    let hours = (total_secs % 86400) / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+
+    if days > 0 {
+        format!("{}d {}:{:02}:{:02}", days, hours, mins, secs)
+    } else if hours > 0 {
+        format!("{}:{:02}:{:02}", hours, mins, secs)
+    } else {
+        format!("{}:{:02}", mins, secs)
+    }
 }
