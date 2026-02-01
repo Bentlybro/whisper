@@ -511,7 +511,7 @@ impl ChatUI {
         let nick_display = self.own_nickname.as_deref().unwrap_or("No nickname");
         let header = Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("🔒 WSP", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("🔒 WSP v2", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::raw(" | "),
                 Span::styled("E2EE Chat", Style::default().fg(Color::Green)),
             ]),
