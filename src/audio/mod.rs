@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-const SAMPLE_RATE: u32 = 48000;
-const CHANNELS: u16 = 1;
+const OPUS_SAMPLE_RATE: u32 = 48000;
+const OPUS_CHANNELS: u16 = 1;
 const FRAME_SIZE: usize = 960; // 20ms at 48kHz mono
 
 /// Manages audio capture and playback for voice calls
@@ -22,9 +22,6 @@ pub struct AudioPipeline {
 }
 
 impl AudioPipeline {
-    /// Start the audio pipeline. Returns the pipeline handle.
-    /// - `capture_rx`: poll this for encoded Opus frames to send
-    /// - `playback_tx`: push decoded PCM f32 samples here for playback
     pub fn start() -> Result<Self> {
         let host = cpal::default_host();
         let running = Arc::new(AtomicBool::new(true));
@@ -58,22 +55,18 @@ impl AudioPipeline {
         })
     }
 
-    /// Take the capture receiver (Opus-encoded frames ready to encrypt & send)
     pub fn take_capture_rx(&mut self) -> Option<mpsc::UnboundedReceiver<Vec<u8>>> {
         self.capture_rx.take()
     }
 
-    /// Get a clone of the playback sender (send decoded PCM f32 samples here)
     pub fn playback_tx(&self) -> Option<mpsc::UnboundedSender<Vec<f32>>> {
         self.playback_tx.clone()
     }
 
-    /// Stop the audio pipeline
     pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
     }
 
-    /// Decode an Opus frame to PCM f32 samples
     pub fn decode_opus_frame(decoder: &mut audiopus::coder::Decoder, opus_data: &[u8]) -> Result<Vec<f32>> {
         use std::convert::TryFrom;
         let mut output = vec![0f32; FRAME_SIZE];
@@ -84,7 +77,7 @@ impl AudioPipeline {
         let decoded = decoder.decode_float(
             Some(packet),
             mut_signals,
-            false, // no FEC
+            false,
         ).map_err(|e| anyhow::anyhow!("Opus decode error: {}", e))?;
         output.truncate(decoded);
         Ok(output)
@@ -99,14 +92,23 @@ impl AudioPipeline {
         let device = host.default_input_device()
             .ok_or_else(|| anyhow::anyhow!("No audio input device found"))?;
 
+        // Use device's default config instead of forcing our own
+        let default_config = device.default_input_config()
+            .map_err(|e| anyhow::anyhow!("No default input config: {}", e))?;
+
+        let device_sample_rate = default_config.sample_rate().0;
+        let device_channels = default_config.channels();
+
         let config = cpal::StreamConfig {
-            channels: CHANNELS,
-            sample_rate: cpal::SampleRate(SAMPLE_RATE),
-            buffer_size: cpal::BufferSize::Fixed(FRAME_SIZE as u32),
+            channels: device_channels,
+            sample_rate: cpal::SampleRate(device_sample_rate),
+            buffer_size: cpal::BufferSize::Default,
         };
 
-        // Buffer to accumulate exactly FRAME_SIZE samples
-        let buffer = Arc::new(std::sync::Mutex::new(Vec::<f32>::with_capacity(FRAME_SIZE * 2)));
+        // Calculate how many device samples = one 20ms Opus frame
+        let device_frame_size = (device_sample_rate as usize * 20) / 1000 * device_channels as usize;
+
+        let buffer = Arc::new(std::sync::Mutex::new(Vec::<f32>::with_capacity(device_frame_size * 2)));
         let buffer_clone = buffer.clone();
 
         let stream = device.build_input_stream(
@@ -118,24 +120,43 @@ impl AudioPipeline {
                 let mut buf = buffer_clone.lock().unwrap();
                 buf.extend_from_slice(data);
 
-                // Process complete frames
-                while buf.len() >= FRAME_SIZE {
-                    let frame: Vec<f32> = buf.drain(..FRAME_SIZE).collect();
+                while buf.len() >= device_frame_size {
+                    let raw_frame: Vec<f32> = buf.drain(..device_frame_size).collect();
+
+                    // Convert to mono if needed
+                    let mono = if device_channels > 1 {
+                        raw_frame.chunks(device_channels as usize)
+                            .map(|ch| ch.iter().sum::<f32>() / device_channels as f32)
+                            .collect::<Vec<f32>>()
+                    } else {
+                        raw_frame
+                    };
+
+                    // Resample to 48kHz if needed
+                    let resampled = if device_sample_rate != OPUS_SAMPLE_RATE {
+                        linear_resample(&mono, device_sample_rate, OPUS_SAMPLE_RATE, FRAME_SIZE)
+                    } else {
+                        // Might need to pad/truncate to exact FRAME_SIZE
+                        let mut frame = mono;
+                        frame.resize(FRAME_SIZE, 0.0);
+                        frame
+                    };
+
                     // Encode to Opus
-                    let mut opus_out = vec![0u8; 4000]; // max opus frame
-                    match encoder.encode_float(&frame, &mut opus_out) {
+                    let mut opus_out = vec![0u8; 4000];
+                    match encoder.encode_float(&resampled, &mut opus_out) {
                         Ok(len) => {
                             opus_out.truncate(len);
                             let _ = tx.send(opus_out);
                         }
-                        Err(_) => {} // skip frame on encode error
+                        Err(_) => {}
                     }
                 }
             },
             |err| {
                 eprintln!("Audio capture error: {}", err);
             },
-            None, // no timeout
+            None,
         )?;
 
         stream.play()?;
@@ -151,18 +172,26 @@ impl AudioPipeline {
         let device = host.default_output_device()
             .ok_or_else(|| anyhow::anyhow!("No audio output device found"))?;
 
+        let default_config = device.default_output_config()
+            .map_err(|e| anyhow::anyhow!("No default output config: {}", e))?;
+
+        let device_sample_rate = default_config.sample_rate().0;
+        let device_channels = default_config.channels();
+
         let config = cpal::StreamConfig {
-            channels: CHANNELS,
-            sample_rate: cpal::SampleRate(SAMPLE_RATE),
+            channels: device_channels,
+            sample_rate: cpal::SampleRate(device_sample_rate),
             buffer_size: cpal::BufferSize::Default,
         };
 
-        // Ring buffer for playback — accumulates decoded samples
+        // Ring buffer for playback
         let playback_buf = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<f32>::new()));
         let playback_buf_writer = playback_buf.clone();
 
-        // Spawn a thread to move samples from channel to ring buffer
         let running_clone = running.clone();
+        let out_channels = device_channels;
+        let out_rate = device_sample_rate;
+
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -174,14 +203,32 @@ impl AudioPipeline {
                     if !running_clone.load(Ordering::Relaxed) {
                         break;
                     }
+
+                    // Resample from 48kHz to device rate if needed
+                    let resampled = if out_rate != OPUS_SAMPLE_RATE {
+                        let target_len = (samples.len() as u64 * out_rate as u64 / OPUS_SAMPLE_RATE as u64) as usize;
+                        linear_resample(&samples, OPUS_SAMPLE_RATE, out_rate, target_len)
+                    } else {
+                        samples
+                    };
+
+                    // Expand mono to multi-channel if needed
+                    let expanded = if out_channels > 1 {
+                        resampled.iter()
+                            .flat_map(|&s| std::iter::repeat(s).take(out_channels as usize))
+                            .collect::<Vec<f32>>()
+                    } else {
+                        resampled
+                    };
+
                     let mut buf = playback_buf_writer.lock().unwrap();
                     // Limit buffer to ~200ms to avoid growing latency
-                    let max_buf = SAMPLE_RATE as usize / 5; // 200ms
+                    let max_buf = out_rate as usize * out_channels as usize / 5;
                     if buf.len() > max_buf {
                         let drain = buf.len() - max_buf;
                         buf.drain(..drain);
                     }
-                    buf.extend(samples);
+                    buf.extend(expanded);
                 }
             });
         });
@@ -209,4 +256,20 @@ impl Drop for AudioPipeline {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// Simple linear interpolation resampler
+fn linear_resample(input: &[f32], from_rate: u32, to_rate: u32, output_len: usize) -> Vec<f32> {
+    if input.is_empty() {
+        return vec![0.0; output_len];
+    }
+    let ratio = from_rate as f64 / to_rate as f64;
+    (0..output_len).map(|i| {
+        let src_pos = i as f64 * ratio;
+        let idx = src_pos as usize;
+        let frac = src_pos - idx as f64;
+        let a = input.get(idx).copied().unwrap_or(0.0);
+        let b = input.get(idx + 1).copied().unwrap_or(a);
+        a + (b - a) * frac as f32
+    }).collect()
 }
