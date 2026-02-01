@@ -712,11 +712,17 @@ impl ChatUI {
     // File sharing methods
     
     fn handle_share_command(&mut self, filepath: &str, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
-        const CHUNK_SIZE: usize = 65536; // 64KB
+        const CHUNK_SIZE: usize = 16384; // 16KB chunks for reliable WebSocket transfer
         
-        // Expand tilde in path
+        // Check if we have any peers
+        if self.peers.is_empty() {
+            self.status = "No peers connected to share with".to_string();
+            return;
+        }
+        
+        // Expand tilde in path (Unix) or use as-is (Windows handles C:\ etc)
         let path = if filepath.starts_with("~/") {
-            if let Some(home) = std::env::var_os("HOME") {
+            if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
                 PathBuf::from(home).join(&filepath[2..])
             } else {
                 PathBuf::from(filepath)
@@ -802,7 +808,7 @@ impl ChatUI {
         if let Some((file_id, pending)) = offer_to_accept {
             // Expand path
             let save_dir = if save_path.starts_with("~/") {
-                if let Some(home) = std::env::var_os("HOME") {
+                if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
                     PathBuf::from(home).join(&save_path[2..])
                 } else {
                     PathBuf::from(save_path)

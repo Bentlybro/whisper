@@ -37,12 +37,19 @@ impl RelayServer {
 
         loop {
             let (stream, _) = listener.accept().await?;
-            println!("🔌 New connection (identity hidden)");
             
             let peers = self.peers.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, peers).await {
-                    eprintln!("❌ Connection error: {}", e);
+                match handle_connection(stream, peers).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        // Silently ignore non-WebSocket connections (bots/scanners)
+                        if !err_str.contains("Connection: upgrade") 
+                            && !err_str.contains("protocol error") {
+                            eprintln!("❌ Connection error: {}", e);
+                        }
+                    }
                 }
             });
         }
