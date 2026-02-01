@@ -20,6 +20,8 @@ use tokio::sync::mpsc;
 use crate::client::{OutgoingMessage, PeerInfo};
 use crate::protocol::{PlainMessage, FileOffer, FileChunk};
 
+const FILE_CHUNK_SIZE: usize = 16384; // 16KB chunks for file transfer
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Tab {
     Global,
@@ -713,7 +715,6 @@ impl ChatUI {
     // File sharing methods
     
     fn handle_share_command(&mut self, filepath: &str, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
-        const CHUNK_SIZE: usize = 16384; // 16KB chunks for reliable WebSocket transfer
         
         self.status = format!("Reading file: {}...", filepath);
         
@@ -756,7 +757,7 @@ impl ChatUI {
         let checksum = blake3::hash(&file_data).to_hex().to_string();
         
         // Calculate chunks
-        let total_chunks = ((file_data.len() + CHUNK_SIZE - 1) / CHUNK_SIZE) as u32;
+        let total_chunks = ((file_data.len() + FILE_CHUNK_SIZE - 1) / FILE_CHUNK_SIZE) as u32;
         
         // Generate random file ID
         let file_id = format!("{:x}", rand::random::<u64>());
@@ -957,7 +958,6 @@ impl ChatUI {
     }
     
     fn handle_file_response(&mut self, msg: PlainMessage, accept: bool, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
-        const CHUNK_SIZE: usize = 65536;
         let file_id = &msg.content;
         
         if !accept {
@@ -976,8 +976,8 @@ impl ChatUI {
             // Send all chunks
             let total_chunks = transfer.offer.total_chunks as usize;
             for i in 0..total_chunks {
-                let start = i * CHUNK_SIZE;
-                let end = ((i + 1) * CHUNK_SIZE).min(transfer.file_data.len());
+                let start = i * FILE_CHUNK_SIZE;
+                let end = ((i + 1) * FILE_CHUNK_SIZE).min(transfer.file_data.len());
                 let chunk_data = transfer.file_data[start..end].to_vec();
                 
                 let chunk = FileChunk {
