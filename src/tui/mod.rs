@@ -120,6 +120,11 @@ impl ChatUI {
                             KeyCode::End => {
                                 self.cursor = self.input.len();
                             }
+                            KeyCode::Enter if key.modifiers.contains(event::KeyModifiers::SHIFT) => {
+                                // Shift+Enter inserts a newline
+                                self.input.insert(self.cursor, '\n');
+                                self.cursor += 1;
+                            }
                             KeyCode::Enter => {
                                 if !self.input.is_empty() {
                                     let text: String = self.input.iter().collect();
@@ -151,16 +156,52 @@ impl ChatUI {
         }
     }
 
+    /// Count display lines for input text (accounting for newlines and wrapping)
+    fn count_input_lines(input: &[char], inner_width: usize) -> usize {
+        if input.is_empty() {
+            return 1;
+        }
+        let mut lines = 0;
+        let mut col = 0;
+        for &ch in input {
+            if ch == '\n' {
+                lines += 1;
+                col = 0;
+            } else {
+                col += 1;
+                if col > inner_width {
+                    lines += 1;
+                    col = 1;
+                }
+            }
+        }
+        lines + 1 // +1 because we count breaks, not lines
+    }
+
+    /// Calculate cursor (x, y) position accounting for newlines and wrapping
+    fn cursor_position(input: &[char], cursor: usize, inner_width: usize) -> (u16, u16) {
+        let mut row: u16 = 0;
+        let mut col: u16 = 0;
+        for i in 0..cursor.min(input.len()) {
+            if input[i] == '\n' {
+                row += 1;
+                col = 0;
+            } else {
+                col += 1;
+                if col as usize > inner_width {
+                    row += 1;
+                    col = 1;
+                }
+            }
+        }
+        (col, row)
+    }
+
     fn ui(&self, f: &mut Frame) {
-        // Calculate input box height based on text wrapping
+        // Calculate input box height based on text wrapping and newlines
         let total_width = f.area().width as usize;
         let inner_width = if total_width > 2 { total_width - 2 } else { 1 };
-        let input_len = self.input.len();
-        let input_lines = if input_len == 0 {
-            1
-        } else {
-            (input_len + inner_width - 1) / inner_width
-        };
+        let input_lines = Self::count_input_lines(&self.input, inner_width);
         let input_height = (input_lines as u16) + 2; // +2 for borders
 
         let chunks = Layout::default()
@@ -274,8 +315,7 @@ impl ChatUI {
         f.render_widget(input, chunks[2]);
 
         // Position the cursor in the input box
-        let cursor_x = (self.cursor % inner_width) as u16;
-        let cursor_y = (self.cursor / inner_width) as u16;
+        let (cursor_x, cursor_y) = Self::cursor_position(&self.input, self.cursor, inner_width);
         f.set_cursor_position((
             chunks[2].x + 1 + cursor_x, // +1 for border
             chunks[2].y + 1 + cursor_y,  // +1 for border
