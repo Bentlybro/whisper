@@ -188,10 +188,6 @@ impl ChatUI {
                             KeyCode::Enter => {
                                 if !self.input.is_empty() {
                                     let text: String = self.input.iter().collect();
-                                    // Debug: show raw input in status
-                                    let first_chars: String = text.chars().take(30).collect();
-                                    let starts_slash = text.trim().starts_with('/');
-                                    self.status = format!("INPUT[{}]: '{}' slash={}", text.len(), first_chars, starts_slash);
                                     self.handle_input(text, msg_tx);
                                     self.input.clear();
                                     self.cursor = 0;
@@ -276,8 +272,6 @@ impl ChatUI {
                 return;
             }
             
-            self.status = format!("Command: /{} ({})", parts[0], parts.len());
-
             match parts[0] {
                 "dm" => {
                     if parts.len() < 2 {
@@ -503,7 +497,7 @@ impl ChatUI {
         let left_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),
+                Constraint::Length(4),  // Header needs 4: border + 2 content lines + border
                 Constraint::Min(1),
                 Constraint::Length(input_height),
                 Constraint::Length(3),
