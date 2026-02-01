@@ -21,7 +21,7 @@ pub enum Commands {
     /// Start a chat session
     Chat {
         /// Relay server URL
-        #[arg(short, long, default_value = "ws://localhost:8080")]
+        #[arg(short, long, default_value = "ws://localhost:8899")]
         relay: String,
 
         /// Identity file path
@@ -36,7 +36,7 @@ pub enum Commands {
     /// Run a relay server
     Relay {
         /// Address to bind to
-        #[arg(short, long, default_value = "0.0.0.0:8080")]
+        #[arg(short, long, default_value = "0.0.0.0:8899")]
         addr: String,
     },
 }

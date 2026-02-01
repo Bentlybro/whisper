@@ -36,8 +36,8 @@ impl RelayServer {
         println!();
 
         loop {
-            let (stream, addr) = listener.accept().await?;
-            println!("🔌 New connection from: {}", addr);
+            let (stream, _) = listener.accept().await?;
+            println!("🔌 New connection (identity hidden)");
             
             let peers = self.peers.clone();
             tokio::spawn(async move {
@@ -114,7 +114,7 @@ async fn handle_connection(stream: TcpStream, peers: PeerMap) -> Result<()> {
     // Cleanup on disconnect
     if let Some(sid) = session_id {
         peers.write().await.remove(&sid);
-        println!("🔌 Session disconnected: {}", sid);
+        println!("🔌 Session disconnected");
     }
 
     send_task.abort();
