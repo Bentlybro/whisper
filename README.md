@@ -99,6 +99,15 @@ cargo build --release
 ./target/release/wsp --help
 ```
 
+#### Windows Build Note
+
+Voice calls require Opus (built via CMake). If you get a CMake policy error:
+
+```cmd
+set CMAKE_POLICY_VERSION_MINIMUM=3.5
+cargo build --release
+```
+
 ### Install with Cargo
 
 ```bash
