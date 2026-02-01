@@ -29,6 +29,8 @@ pub enum OutgoingMessage {
     JoinRoom { group_id: String },
     /// Tell the relay to leave a group room
     LeaveRoom { group_id: String },
+    /// Send an encrypted audio frame (raw, no PlainMessage overhead)
+    Audio { target_id: String, data: Vec<u8> },
 }
 
 pub struct ChatClient {
@@ -70,12 +72,14 @@ impl ChatClient {
         mpsc::UnboundedReceiver<PlainMessage>,
         mpsc::UnboundedReceiver<String>, // Status messages
         mpsc::UnboundedReceiver<HashMap<String, PeerInfo>>, // Peer updates
+        mpsc::UnboundedReceiver<(String, Vec<u8>)>, // Incoming audio frames (peer_id, decrypted_opus_data)
     )> {
         // Channels for communication with TUI (persist across reconnects)
         let (msg_tx, msg_rx) = mpsc::unbounded_channel::<OutgoingMessage>();
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel::<PlainMessage>();
         let (status_tx, status_rx) = mpsc::unbounded_channel::<String>();
         let (peer_update_tx, peer_update_rx) = mpsc::unbounded_channel::<HashMap<String, PeerInfo>>();
+        let (audio_in_tx, audio_in_rx) = mpsc::unbounded_channel::<(String, Vec<u8>)>();
 
         let identity = self.identity.clone_for_thread();
         let session_id = self.session_id.clone();
@@ -92,6 +96,7 @@ impl ChatClient {
         // Spawn reconnection loop
         let peers_reconnect = peers.clone();
         let status_tx_reconnect = status_tx.clone();
+        let audio_in_tx_reconnect = audio_in_tx.clone();
         tokio::spawn(async move {
             let mut reconnect_delay = 1u64;
             let mut attempt = 0u32;
@@ -109,6 +114,7 @@ impl ChatClient {
                     incoming_tx.clone(),
                     status_tx_reconnect.clone(),
                     peer_update_tx.clone(),
+                    audio_in_tx_reconnect.clone(),
                     attempt,
                 ).await {
                     Ok(_) => {
@@ -131,7 +137,7 @@ impl ChatClient {
             }
         });
 
-        Ok((msg_tx, incoming_rx, status_rx, peer_update_rx))
+        Ok((msg_tx, incoming_rx, status_rx, peer_update_rx, audio_in_rx))
     }
 
     async fn establish_connection(
@@ -145,6 +151,7 @@ impl ChatClient {
         incoming_tx: mpsc::UnboundedSender<PlainMessage>,
         status_tx: mpsc::UnboundedSender<String>,
         peer_update_tx: mpsc::UnboundedSender<HashMap<String, PeerInfo>>,
+        audio_in_tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
         attempt: u32,
     ) -> Result<()> {
         // Connect to relay
@@ -343,6 +350,18 @@ impl ChatClient {
                                         }
                                     }
                                 }
+                                Message::AudioFrame { from, nonce, ciphertext } => {
+                                    if from == session_id_recv {
+                                        continue;
+                                    }
+                                    // Decrypt audio frame with pairwise key — low latency path
+                                    let peers_map = peers_recv.read().await;
+                                    if let Some(peer_info) = peers_map.get(&from) {
+                                        if let Ok(opus_data) = decrypt_message(&peer_info.shared_secret, &nonce, &ciphertext) {
+                                            let _ = audio_in_tx.send((from, opus_data));
+                                        }
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -518,6 +537,25 @@ impl ChatClient {
                                     if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
                                         let _ = failure_tx_send.send("Send failed".to_string());
                                         break;
+                                    }
+                                }
+                                OutgoingMessage::Audio { target_id, data: audio_data } => {
+                                    // Encrypt audio frame and send — fast path
+                                    let peers_map = peers_send.read().await;
+                                    if let Some(peer_info) = peers_map.get(&target_id) {
+                                        if let Ok((nonce, ciphertext)) = encrypt_message(&peer_info.shared_secret, &audio_data) {
+                                            let audio_msg = Message::AudioFrame {
+                                                from: session_id_send.clone(),
+                                                nonce,
+                                                ciphertext,
+                                            };
+                                            if let Ok(data) = bincode::serialize(&audio_msg) {
+                                                if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
+                                                    let _ = failure_tx_send.send("Send failed".to_string());
+                                                    break;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }

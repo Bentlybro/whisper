@@ -31,6 +31,7 @@ A terminal-based encrypted messenger where **everything is E2EE**, messages are 
 - **🏷️ Nicknames**: Set display names without revealing identity
 - **🔄 Auto-Reconnect**: Seamless reconnection with keepalive — survives network hiccups
 - **🔒 Optional Encrypted Storage**: Save chat history encrypted locally (your key only)
+- **🔊 E2EE Voice Calls**: Real-time encrypted voice calls in DMs — Opus codec, ChaCha20-Poly1305 per frame
 - **⚡ Fast & Lightweight**: Rust-powered async networking with tokio
 
 ---
@@ -153,6 +154,10 @@ wsp chat --relay ws://localhost:8080
 | `/group invite <peer>` | Invite a peer to the current group |
 | `/group leave` | Leave the current group |
 | `/group members` | List members of the current group |
+| `/call` | Start an E2EE voice call (DM tab only) |
+| `/accept-call` | Accept an incoming voice call |
+| `/reject-call` | Reject an incoming voice call |
+| `/hangup` | End the current voice call |
 | `/send <filepath>` | Send an encrypted file to the current tab |
 | `/accept <save_path>` | Accept an incoming file transfer |
 | `/reject` | Reject an incoming file transfer |
@@ -246,8 +251,16 @@ History is encrypted with your identity key and stored locally.
   - File transfer works in groups too
 - [x] **Forward-Compatible Serialization** (MessagePack replaces bincode — new fields won't break older clients)
 
+### v0.4 ✅
+- [x] **E2EE Voice Calls** — Real-time encrypted voice calls in DMs
+  - `/call` — initiate a voice call in a DM tab
+  - `/accept-call` / `/reject-call` — respond to incoming calls
+  - `/hangup` — end the current call
+  - Opus codec (48kHz mono, 20ms frames) → ChaCha20-Poly1305 encryption → WebSocket transport
+  - Low-latency audio pipeline with cpal for capture/playback
+  - Status bar shows active call with duration timer
+
 ### Planned Features
-- [ ] **E2EE Voice Calls** (`/call` — encrypted real-time audio calls in DMs)
 - [ ] **Double Ratchet Protocol** (forward secrecy like Signal)
 - [ ] **Peer-to-Peer Mode** (no relay required)
 - [ ] **QR Code Identity Sharing** (for mobile)
@@ -267,6 +280,8 @@ History is encrypted with your identity key and stored locally.
 - **x25519-dalek** (elliptic curve cryptography)
 - **chacha20poly1305** (authenticated encryption)
 - **blake3** (key derivation)
+- **cpal** (cross-platform audio I/O)
+- **audiopus** (Opus codec for voice)
 
 ### Build & Test
 

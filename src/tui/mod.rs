@@ -17,6 +17,7 @@ use std::io;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
+use crate::audio::AudioPipeline;
 use crate::client::{OutgoingMessage, PeerInfo};
 use crate::protocol::{PlainMessage, FileOffer, FileChunk, GroupInvite};
 
@@ -59,6 +60,12 @@ struct OutgoingTransfer {
     is_direct: bool,
 }
 
+#[derive(Clone, Debug)]
+struct CallState {
+    peer_id: String,
+    start_time: chrono::DateTime<chrono::Utc>,
+}
+
 pub struct ChatUI {
     tabs: Vec<Tab>,
     active_tab: usize,
@@ -73,6 +80,11 @@ pub struct ChatUI {
     active_transfers: HashMap<String, ActiveTransfer>,
     outgoing_transfers: HashMap<String, OutgoingTransfer>,
     groups: HashMap<String, GroupInfo>, // group_id -> GroupInfo
+    // Voice call state
+    active_call: Option<CallState>,
+    pending_call_from: Option<String>, // peer_id of incoming call request
+    audio_pipeline: Option<AudioPipeline>,
+    audio_capture_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>, // Opus frames from mic
 }
 
 impl ChatUI {
@@ -94,6 +106,10 @@ impl ChatUI {
             active_transfers: HashMap::new(),
             outgoing_transfers: HashMap::new(),
             groups: HashMap::new(),
+            active_call: None,
+            pending_call_from: None,
+            audio_pipeline: None,
+            audio_capture_rx: None,
         }
     }
 
@@ -103,6 +119,7 @@ impl ChatUI {
         mut incoming_rx: mpsc::UnboundedReceiver<PlainMessage>,
         mut status_rx: mpsc::UnboundedReceiver<String>,
         mut peer_update_rx: mpsc::UnboundedReceiver<HashMap<String, PeerInfo>>,
+        mut audio_in_rx: mpsc::UnboundedReceiver<(String, Vec<u8>)>,
     ) -> Result<()> {
         // Setup terminal - no mouse capture so native text selection works
         enable_raw_mode()?;
@@ -111,7 +128,7 @@ impl ChatUI {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
-        let result = self.run_loop(&mut terminal, &mut msg_tx, &mut incoming_rx, &mut status_rx, &mut peer_update_rx).await;
+        let result = self.run_loop(&mut terminal, &mut msg_tx, &mut incoming_rx, &mut status_rx, &mut peer_update_rx, &mut audio_in_rx).await;
 
         // Restore terminal
         disable_raw_mode()?;
@@ -131,7 +148,10 @@ impl ChatUI {
         incoming_rx: &mut mpsc::UnboundedReceiver<PlainMessage>,
         status_rx: &mut mpsc::UnboundedReceiver<String>,
         peer_update_rx: &mut mpsc::UnboundedReceiver<HashMap<String, PeerInfo>>,
+        audio_in_rx: &mut mpsc::UnboundedReceiver<(String, Vec<u8>)>,
     ) -> Result<()> {
+        // Opus decoder for incoming audio (created lazily when call starts)
+        let mut opus_decoder: Option<audiopus::coder::Decoder> = None;
         loop {
             terminal.draw(|f| self.ui(f))?;
 
@@ -212,6 +232,20 @@ impl ChatUI {
 
             // Check for incoming messages
             while let Ok(msg) = incoming_rx.try_recv() {
+                // Handle voice call signaling
+                if msg.call_request == Some(true) {
+                    self.handle_incoming_call_request(&msg, msg_tx);
+                    continue;
+                }
+                if let Some(accept) = msg.call_accept {
+                    self.handle_call_response(&msg, accept, msg_tx);
+                    continue;
+                }
+                if msg.call_hangup == Some(true) {
+                    self.handle_remote_hangup(&msg);
+                    continue;
+                }
+
                 // Handle group invites
                 if let Some(ref invite) = msg.group_invite {
                     self.handle_group_invite(msg.clone(), invite.clone(), msg_tx);
@@ -282,6 +316,43 @@ impl ChatUI {
             while let Ok(peers) = peer_update_rx.try_recv() {
                 self.peers = peers;
             }
+
+            // Handle incoming audio frames (decrypt → decode → playback)
+            while let Ok((from, opus_data)) = audio_in_rx.try_recv() {
+                if let Some(ref call) = self.active_call {
+                    if call.peer_id == from {
+                        // Decode and send to playback
+                        if opus_decoder.is_none() {
+                            opus_decoder = audiopus::coder::Decoder::new(
+                                audiopus::SampleRate::Hz48000,
+                                audiopus::Channels::Mono,
+                            ).ok();
+                        }
+                        if let Some(ref mut decoder) = opus_decoder {
+                            if let Ok(pcm) = AudioPipeline::decode_opus_frame(decoder, &opus_data) {
+                                if let Some(ref pipeline) = self.audio_pipeline {
+                                    if let Some(tx) = pipeline.playback_tx() {
+                                        let _ = tx.send(pcm);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Send captured audio frames to peer
+            if let Some(ref call) = self.active_call {
+                let peer_id = call.peer_id.clone();
+                if let Some(ref mut capture_rx) = self.audio_capture_rx {
+                    while let Ok(opus_frame) = capture_rx.try_recv() {
+                        let _ = msg_tx.send(OutgoingMessage::Audio {
+                            target_id: peer_id.clone(),
+                            data: opus_frame,
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -328,6 +399,18 @@ impl ChatUI {
                 }
                 "group" => {
                     self.handle_group_command(&parts[1..], msg_tx);
+                }
+                "call" => {
+                    self.handle_call_command(msg_tx);
+                }
+                "accept-call" => {
+                    self.handle_accept_call_command(msg_tx);
+                }
+                "reject-call" => {
+                    self.handle_reject_call_command(msg_tx);
+                }
+                "hangup" | "end-call" => {
+                    self.handle_hangup_command(msg_tx);
                 }
                 "send" | "share" => {
                     if parts.len() < 2 {
@@ -759,20 +842,35 @@ impl ChatUI {
 
         // Header
         let nick_display = self.own_nickname.as_deref().unwrap_or("No nickname");
+        let mut header_line2 = vec![
+            Span::raw("Your ID: "),
+            Span::styled(&self.own_id[..16.min(self.own_id.len())], Style::default().fg(Color::Yellow)),
+            Span::raw(" | "),
+            Span::styled(nick_display, Style::default().fg(Color::Magenta)),
+        ];
+
+        if let Some(ref call) = self.active_call {
+            let peer_name = self.get_peer_display_name(&call.peer_id);
+            let duration = chrono::Utc::now() - call.start_time;
+            let mins = duration.num_minutes();
+            let secs = duration.num_seconds() % 60;
+            header_line2.push(Span::raw(" | "));
+            header_line2.push(Span::styled(
+                format!("🔊 {} ({}:{:02})", peer_name, mins, secs),
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        header_line2.push(Span::raw(" | "));
+        header_line2.push(Span::raw(&self.status));
+
         let header = Paragraph::new(vec![
             Line::from(vec![
                 Span::styled("🔒 WSP v2", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::raw(" | "),
                 Span::styled("E2EE Chat", Style::default().fg(Color::Green)),
             ]),
-            Line::from(vec![
-                Span::raw("Your ID: "),
-                Span::styled(&self.own_id[..16.min(self.own_id.len())], Style::default().fg(Color::Yellow)),
-                Span::raw(" | "),
-                Span::styled(nick_display, Style::default().fg(Color::Magenta)),
-                Span::raw(" | "),
-                Span::raw(&self.status),
-            ]),
+            Line::from(header_line2),
         ])
         .block(Block::default().borders(Borders::ALL).title("Status"));
         f.render_widget(header, left_chunks[0]);
@@ -967,6 +1065,222 @@ impl ChatUI {
                 }
             }
         }
+    }
+
+    // Voice call methods
+
+    fn handle_call_command(&mut self, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        // Must be in a DM tab
+        let current_tab = &self.tabs[self.active_tab].clone();
+        let peer_id = match current_tab {
+            Tab::DirectMessage(id) => id.clone(),
+            _ => {
+                self.status = "Voice calls only work in DM tabs. Use /dm <peer> first.".to_string();
+                return;
+            }
+        };
+
+        if self.active_call.is_some() {
+            self.status = "Already in a call. Use /hangup first.".to_string();
+            return;
+        }
+
+        // Send call request
+        let call_req = PlainMessage::call_request(self.own_id.clone());
+        let _ = msg_tx.send(OutgoingMessage::Direct {
+            target_id: peer_id.clone(),
+            message: call_req,
+        });
+
+        let peer_name = self.get_peer_display_name(&peer_id);
+        self.status = format!("📞 Calling {}...", peer_name);
+
+        // Add system message to DM
+        let sys_msg = PlainMessage::system(
+            self.own_id.clone(),
+            format!("Calling {}...", peer_name),
+        );
+        self.messages.entry(current_tab.clone()).or_insert_with(Vec::new).push(sys_msg);
+    }
+
+    fn handle_accept_call_command(&mut self, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        let peer_id = match self.pending_call_from.take() {
+            Some(id) => id,
+            None => {
+                self.status = "No incoming call to accept.".to_string();
+                return;
+            }
+        };
+
+        if self.active_call.is_some() {
+            self.status = "Already in a call. Use /hangup first.".to_string();
+            self.pending_call_from = Some(peer_id);
+            return;
+        }
+
+        // Send acceptance
+        let accept_msg = PlainMessage::call_accept(self.own_id.clone(), true);
+        let _ = msg_tx.send(OutgoingMessage::Direct {
+            target_id: peer_id.clone(),
+            message: accept_msg,
+        });
+
+        // Start audio pipeline
+        self.start_audio_call(peer_id.clone());
+    }
+
+    fn handle_reject_call_command(&mut self, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        let peer_id = match self.pending_call_from.take() {
+            Some(id) => id,
+            None => {
+                self.status = "No incoming call to reject.".to_string();
+                return;
+            }
+        };
+
+        let reject_msg = PlainMessage::call_accept(self.own_id.clone(), false);
+        let _ = msg_tx.send(OutgoingMessage::Direct {
+            target_id: peer_id.clone(),
+            message: reject_msg,
+        });
+
+        let peer_name = self.get_peer_display_name(&peer_id);
+        self.status = format!("Rejected call from {}", peer_name);
+
+        // Add system message to DM tab
+        let dm_tab = Tab::DirectMessage(peer_id.clone());
+        let sys_msg = PlainMessage::system(
+            self.own_id.clone(),
+            format!("Rejected call from {}", peer_name),
+        );
+        self.messages.entry(dm_tab).or_insert_with(Vec::new).push(sys_msg);
+    }
+
+    fn handle_hangup_command(&mut self, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        let call = match self.active_call.take() {
+            Some(c) => c,
+            None => {
+                self.status = "Not in a call.".to_string();
+                return;
+            }
+        };
+
+        // Send hangup
+        let hangup_msg = PlainMessage::call_hangup(self.own_id.clone());
+        let _ = msg_tx.send(OutgoingMessage::Direct {
+            target_id: call.peer_id.clone(),
+            message: hangup_msg,
+        });
+
+        self.stop_audio_call(&call);
+    }
+
+    fn handle_incoming_call_request(&mut self, msg: &PlainMessage, _msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        let peer_name = self.get_peer_display_name(&msg.sender);
+
+        if self.active_call.is_some() {
+            // Already in a call — auto-reject would be nice but let's just notify
+            self.status = format!("📞 Missed call from {} (already in a call)", peer_name);
+            return;
+        }
+
+        self.pending_call_from = Some(msg.sender.clone());
+        self.status = format!("📞 Incoming call from {} — /accept-call or /reject-call", peer_name);
+
+        // Ensure DM tab exists
+        let dm_tab = Tab::DirectMessage(msg.sender.clone());
+        if !self.tabs.contains(&dm_tab) {
+            self.tabs.push(dm_tab.clone());
+            self.messages.insert(dm_tab.clone(), Vec::new());
+        }
+
+        // Add system message
+        let sys_msg = PlainMessage::system(
+            msg.sender.clone(),
+            format!("📞 Incoming call from {} — /accept-call or /reject-call", peer_name),
+        );
+        self.messages.entry(dm_tab).or_insert_with(Vec::new).push(sys_msg);
+    }
+
+    fn handle_call_response(&mut self, msg: &PlainMessage, accept: bool, _msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        let peer_name = self.get_peer_display_name(&msg.sender);
+        let dm_tab = Tab::DirectMessage(msg.sender.clone());
+
+        if accept {
+            // Peer accepted — start audio
+            self.start_audio_call(msg.sender.clone());
+        } else {
+            self.status = format!("{} rejected the call", peer_name);
+            let sys_msg = PlainMessage::system(
+                msg.sender.clone(),
+                format!("{} rejected the call", peer_name),
+            );
+            self.messages.entry(dm_tab).or_insert_with(Vec::new).push(sys_msg);
+        }
+    }
+
+    fn handle_remote_hangup(&mut self, msg: &PlainMessage) {
+        if let Some(ref call) = self.active_call {
+            if call.peer_id == msg.sender {
+                let call = self.active_call.take().unwrap();
+                self.stop_audio_call(&call);
+            }
+        }
+    }
+
+    fn start_audio_call(&mut self, peer_id: String) {
+        let peer_name = self.get_peer_display_name(&peer_id);
+
+        match AudioPipeline::start() {
+            Ok(mut pipeline) => {
+                self.audio_capture_rx = pipeline.take_capture_rx();
+                self.audio_pipeline = Some(pipeline);
+                self.active_call = Some(CallState {
+                    peer_id: peer_id.clone(),
+                    start_time: chrono::Utc::now(),
+                });
+                self.status = format!("🔊 In call with {}", peer_name);
+
+                let dm_tab = Tab::DirectMessage(peer_id);
+                let sys_msg = PlainMessage::system(
+                    self.own_id.clone(),
+                    format!("🔊 Voice call started with {}", peer_name),
+                );
+                self.messages.entry(dm_tab).or_insert_with(Vec::new).push(sys_msg);
+            }
+            Err(e) => {
+                self.status = format!("❌ Failed to start audio: {}", e);
+                let dm_tab = Tab::DirectMessage(peer_id);
+                let sys_msg = PlainMessage::system(
+                    self.own_id.clone(),
+                    format!("❌ Failed to start audio: {}", e),
+                );
+                self.messages.entry(dm_tab).or_insert_with(Vec::new).push(sys_msg);
+            }
+        }
+    }
+
+    fn stop_audio_call(&mut self, call: &CallState) {
+        let peer_name = self.get_peer_display_name(&call.peer_id);
+        let duration = chrono::Utc::now() - call.start_time;
+        let mins = duration.num_minutes();
+        let secs = duration.num_seconds() % 60;
+
+        // Stop audio pipeline
+        if let Some(ref pipeline) = self.audio_pipeline {
+            pipeline.stop();
+        }
+        self.audio_pipeline = None;
+        self.audio_capture_rx = None;
+
+        self.status = format!("Call with {} ended ({}:{:02})", peer_name, mins, secs);
+
+        let dm_tab = Tab::DirectMessage(call.peer_id.clone());
+        let sys_msg = PlainMessage::system(
+            self.own_id.clone(),
+            format!("📵 Call ended with {} ({}:{:02})", peer_name, mins, secs),
+        );
+        self.messages.entry(dm_tab).or_insert_with(Vec::new).push(sys_msg);
     }
 
     // File sharing methods

@@ -36,6 +36,12 @@ pub enum Message {
         nonce: Vec<u8>,
         ciphertext: Vec<u8>,
     },
+    /// Encrypted audio frame — relay forwards to all peers (only target can decrypt)
+    AudioFrame {
+        from: String,
+        nonce: Vec<u8>,
+        ciphertext: Vec<u8>,
+    },
 }
 
 /// File offer metadata
@@ -94,6 +100,15 @@ pub struct PlainMessage {
     /// Group invite data (sent via DM to invite someone)
     #[serde(default)]
     pub group_invite: Option<GroupInvite>,
+    /// Voice call request (true = requesting a call)
+    #[serde(default)]
+    pub call_request: Option<bool>,
+    /// Voice call accept/reject (true = accept, false = reject)
+    #[serde(default)]
+    pub call_accept: Option<bool>,
+    /// Voice call hangup
+    #[serde(default)]
+    pub call_hangup: Option<bool>,
 }
 
 impl PlainMessage {
@@ -111,6 +126,9 @@ impl PlainMessage {
             file_response: None,
             group_id: None,
             group_invite: None,
+            call_request: None,
+            call_accept: None,
+            call_hangup: None,
         }
     }
 
@@ -128,6 +146,9 @@ impl PlainMessage {
             file_response: None,
             group_id: None,
             group_invite: None,
+            call_request: None,
+            call_accept: None,
+            call_hangup: None,
         }
     }
 
@@ -145,6 +166,9 @@ impl PlainMessage {
             file_response: None,
             group_id: None,
             group_invite: None,
+            call_request: None,
+            call_accept: None,
+            call_hangup: None,
         }
     }
 
@@ -162,6 +186,9 @@ impl PlainMessage {
             file_response: None,
             group_id: None,
             group_invite: None,
+            call_request: None,
+            call_accept: None,
+            call_hangup: None,
         }
     }
 
@@ -179,6 +206,9 @@ impl PlainMessage {
             file_response: None,
             group_id: None,
             group_invite: None,
+            call_request: None,
+            call_accept: None,
+            call_hangup: None,
         }
     }
 
@@ -196,6 +226,9 @@ impl PlainMessage {
             file_response: None,
             group_id: None,
             group_invite: None,
+            call_request: None,
+            call_accept: None,
+            call_hangup: None,
         }
     }
 
@@ -213,6 +246,9 @@ impl PlainMessage {
             file_response: None,
             group_id: None,
             group_invite: None,
+            call_request: None,
+            call_accept: None,
+            call_hangup: None,
         }
     }
 
@@ -230,6 +266,9 @@ impl PlainMessage {
             file_response: Some(accept),
             group_id: None,
             group_invite: None,
+            call_request: None,
+            call_accept: None,
+            call_hangup: None,
         }
     }
 
@@ -248,6 +287,9 @@ impl PlainMessage {
             file_response: None,
             group_id: Some(group_id),
             group_invite: None,
+            call_request: None,
+            call_accept: None,
+            call_hangup: None,
         }
     }
 
@@ -266,6 +308,72 @@ impl PlainMessage {
             file_response: None,
             group_id: None,
             group_invite: Some(invite),
+            call_request: None,
+            call_accept: None,
+            call_hangup: None,
+        }
+    }
+
+    /// Voice call request
+    pub fn call_request(sender: String) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().timestamp(),
+            sender,
+            content: String::new(),
+            system: true,
+            nickname: None,
+            direct: true,
+            dm_request: false,
+            file_offer: None,
+            file_chunk: None,
+            file_response: None,
+            group_id: None,
+            group_invite: None,
+            call_request: Some(true),
+            call_accept: None,
+            call_hangup: None,
+        }
+    }
+
+    /// Voice call accept/reject
+    pub fn call_accept(sender: String, accept: bool) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().timestamp(),
+            sender,
+            content: String::new(),
+            system: true,
+            nickname: None,
+            direct: true,
+            dm_request: false,
+            file_offer: None,
+            file_chunk: None,
+            file_response: None,
+            group_id: None,
+            group_invite: None,
+            call_request: None,
+            call_accept: Some(accept),
+            call_hangup: None,
+        }
+    }
+
+    /// Voice call hangup
+    pub fn call_hangup(sender: String) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().timestamp(),
+            sender,
+            content: String::new(),
+            system: true,
+            nickname: None,
+            direct: true,
+            dm_request: false,
+            file_offer: None,
+            file_chunk: None,
+            file_response: None,
+            group_id: None,
+            group_invite: None,
+            call_request: None,
+            call_accept: None,
+            call_hangup: Some(true),
         }
     }
 }
