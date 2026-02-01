@@ -100,7 +100,7 @@ async fn start_chat(relay_url: &str, identity_path: &PathBuf, _save_history: boo
     println!("🔌 Connecting to relay: {}", relay_url);
 
     let mut client = client::ChatClient::new(identity, relay_url.to_string(), nickname.clone());
-    let own_id = client.identity_id();
+    let _own_id = client.identity_id();
     let session_id = client.session_id().to_string();
 
     println!("🔗 Session ID: {}", session_id);
@@ -115,7 +115,7 @@ async fn start_chat(relay_url: &str, identity_path: &PathBuf, _save_history: boo
     // Small delay to let connection establish
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let mut ui = tui::ChatUI::new(own_id, nickname);
+    let mut ui = tui::ChatUI::new(session_id, nickname);
     ui.run(msg_tx, incoming_rx, status_rx, peer_update_rx).await?;
 
     Ok(())

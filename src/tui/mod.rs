@@ -170,7 +170,17 @@ impl ChatUI {
 
             // Check for incoming messages
             while let Ok(msg) = incoming_rx.try_recv() {
-                if msg.system && !msg.content.is_empty() {
+                if msg.dm_request {
+                    // Peer wants to open a DM — create the tab silently
+                    let sender_id = msg.sender.clone();
+                    let dm_tab = Tab::DirectMessage(sender_id.clone());
+                    if !self.tabs.contains(&dm_tab) {
+                        self.tabs.push(dm_tab.clone());
+                        self.messages.insert(dm_tab, Vec::new());
+                        let peer_name = self.get_peer_display_name(&sender_id);
+                        self.status = format!("{} opened a DM with you", peer_name);
+                    }
+                } else if msg.system && !msg.content.is_empty() {
                     // System messages (join/leave) go to global chat
                     self.messages.entry(Tab::Global).or_insert_with(Vec::new).push(msg);
                 } else if !msg.system {
@@ -224,7 +234,7 @@ impl ChatUI {
                         return;
                     }
                     let target = parts[1];
-                    self.open_dm_tab(target);
+                    self.open_dm_tab(target, Some(msg_tx));
                 }
                 "nick" => {
                     if parts.len() < 2 {
@@ -279,7 +289,7 @@ impl ChatUI {
         }
     }
 
-    fn open_dm_tab(&mut self, target: &str) {
+    fn open_dm_tab(&mut self, target: &str, msg_tx: Option<&mpsc::UnboundedSender<OutgoingMessage>>) {
         // Try to find peer by nickname or ID prefix
         let peer_id = self.find_peer_by_name_or_id(target);
         
@@ -294,6 +304,15 @@ impl ChatUI {
                 self.tabs.push(dm_tab.clone());
                 self.messages.insert(dm_tab, Vec::new());
                 self.active_tab = self.tabs.len() - 1;
+                
+                // Send DM request to peer so they open a tab too
+                if let Some(tx) = msg_tx {
+                    let dm_req = PlainMessage::dm_request(self.own_id.clone());
+                    let _ = tx.send(OutgoingMessage::Direct {
+                        target_id: id.clone(),
+                        message: dm_req,
+                    });
+                }
             }
             
             let peer_name = self.get_peer_display_name(&id);

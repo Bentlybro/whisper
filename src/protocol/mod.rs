@@ -34,6 +34,9 @@ pub struct PlainMessage {
     /// Whether this is a direct message (vs global broadcast)
     #[serde(default)]
     pub direct: bool,
+    /// Whether this is a DM open request (peer should open a DM tab)
+    #[serde(default)]
+    pub dm_request: bool,
 }
 
 impl PlainMessage {
@@ -45,6 +48,7 @@ impl PlainMessage {
             system: false,
             nickname: None,
             direct: false,
+            dm_request: false,
         }
     }
 
@@ -56,6 +60,7 @@ impl PlainMessage {
             system: false,
             nickname: None,
             direct: true,
+            dm_request: false,
         }
     }
 
@@ -67,6 +72,7 @@ impl PlainMessage {
             system: true,
             nickname: None,
             direct: false,
+            dm_request: false,
         }
     }
 
@@ -78,6 +84,19 @@ impl PlainMessage {
             system: true,
             nickname: Some(nickname),
             direct: false,
+            dm_request: false,
+        }
+    }
+
+    pub fn dm_request(sender: String) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().timestamp(),
+            sender,
+            content: String::new(),
+            system: true,
+            nickname: None,
+            direct: true,
+            dm_request: true,
         }
     }
 }
