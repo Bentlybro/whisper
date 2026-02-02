@@ -1,154 +1,182 @@
-//! Screen share viewer — displays received frames in a separate OS window.
+//! TUI-based screen share renderer using half-block characters.
 //!
-//! Uses minifb to create a simple pixel buffer window. Runs in a dedicated
-//! thread so the TUI stays responsive.
+//! Each terminal cell represents 2 vertical pixels using the '▀' character:
+//! - Foreground color = top pixel
+//! - Background color = bottom pixel
+//! This gives 2x vertical density while using 24-bit true color.
 
 use anyhow::Result;
 use image::codecs::jpeg::JpegDecoder;
 use image::ImageDecoder;
-use minifb::{Key, Window, WindowOptions};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Style},
+    widgets::Widget,
+};
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use tokio::sync::mpsc;
 
 use super::ScreenFrameData;
 
-/// Screen share viewer — opens a window and displays frames
-pub struct ScreenViewer {
-    running: Arc<AtomicBool>,
-    frame_tx: mpsc::UnboundedSender<ScreenFrameData>,
+/// Decoded frame ready for TUI rendering
+pub struct DecodedFrame {
+    pub width: u32,
+    pub height: u32,
+    /// RGB pixel data (width * height * 3 bytes)
+    pub rgb: Vec<u8>,
 }
 
-impl ScreenViewer {
-    /// Start the viewer window in a background thread.
-    /// Returns a handle with a channel to push frames into.
-    pub fn start(peer_name: String) -> Result<Self> {
-        let running = Arc::new(AtomicBool::new(true));
-        let (frame_tx, frame_rx) = mpsc::unbounded_channel::<ScreenFrameData>();
+impl DecodedFrame {
+    /// Decode a ScreenFrameData (JPEG) into raw RGB pixels
+    pub fn from_frame(frame: &ScreenFrameData) -> Result<Self> {
+        let cursor = Cursor::new(&frame.jpeg_data);
+        let decoder =
+            JpegDecoder::new(cursor).map_err(|e| anyhow::anyhow!("JPEG decode failed: {}", e))?;
 
-        let running_clone = running.clone();
-        std::thread::spawn(move || {
-            viewer_loop(peer_name, frame_rx, running_clone);
-        });
+        let (w, h) = decoder.dimensions();
+        let total_bytes = decoder.total_bytes() as usize;
 
-        Ok(Self { running, frame_tx })
+        let mut rgb = vec![0u8; total_bytes];
+        decoder
+            .read_image(&mut rgb)
+            .map_err(|e| anyhow::anyhow!("JPEG read failed: {}", e))?;
+
+        Ok(Self {
+            width: w,
+            height: h,
+            rgb,
+        })
     }
 
-    /// Send a frame to the viewer
-    pub fn send_frame(&self, frame: ScreenFrameData) -> bool {
-        self.frame_tx.send(frame).is_ok()
-    }
-
-    /// Check if the viewer is still running
-    pub fn is_running(&self) -> bool {
-        self.running.load(Ordering::Relaxed)
-    }
-
-    /// Stop the viewer
-    pub fn stop(&self) {
-        self.running.store(false, Ordering::Relaxed);
+    /// Get a pixel (R, G, B) at (x, y), with bounds checking
+    fn pixel(&self, x: u32, y: u32) -> (u8, u8, u8) {
+        if x >= self.width || y >= self.height {
+            return (0, 0, 0);
+        }
+        let offset = ((y * self.width + x) * 3) as usize;
+        if offset + 2 < self.rgb.len() {
+            (self.rgb[offset], self.rgb[offset + 1], self.rgb[offset + 2])
+        } else {
+            (0, 0, 0)
+        }
     }
 }
 
-impl Drop for ScreenViewer {
-    fn drop(&mut self) {
-        self.stop();
+/// Ratatui widget that renders a decoded frame using half-block characters
+pub struct ScreenWidget<'a> {
+    frame: &'a DecodedFrame,
+}
+
+impl<'a> ScreenWidget<'a> {
+    pub fn new(frame: &'a DecodedFrame) -> Self {
+        Self { frame }
     }
 }
 
-fn viewer_loop(
-    peer_name: String,
-    mut frame_rx: mpsc::UnboundedReceiver<ScreenFrameData>,
-    running: Arc<AtomicBool>,
-) {
-    let title = format!("🔒 WSP Screen Share — {}", peer_name);
-
-    // Start with a placeholder size; resize on first frame
-    let mut width: usize = 640;
-    let mut height: usize = 480;
-    let mut buffer: Vec<u32> = vec![0; width * height];
-
-    let mut window = match Window::new(
-        &title,
-        width,
-        height,
-        WindowOptions {
-            resize: true,
-            scale_mode: minifb::ScaleMode::AspectRatioStretch,
-            ..WindowOptions::default()
-        },
-    ) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("Failed to create viewer window: {}", e);
-            running.store(false, Ordering::Relaxed);
+impl<'a> Widget for ScreenWidget<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.width == 0 || area.height == 0 {
             return;
         }
-    };
 
-    // Limit update rate to ~30fps for the window
-    window.set_target_fps(30);
+        let term_w = area.width as u32;
+        let term_h = area.height as u32;
 
-    while running.load(Ordering::Relaxed) && window.is_open() && !window.is_key_down(Key::Escape) {
-        // Drain all pending frames, keep only the latest
-        let mut latest_frame: Option<ScreenFrameData> = None;
-        while let Ok(frame) = frame_rx.try_recv() {
-            latest_frame = Some(frame);
-        }
+        // Each terminal cell = 2 vertical pixels
+        let pixel_h = term_h * 2;
+        let pixel_w = term_w;
 
-        if let Some(frame) = latest_frame {
-            let fw = frame.width as usize;
-            let fh = frame.height as usize;
+        // Calculate scaling to fit the frame into the terminal area
+        // while preserving aspect ratio
+        let frame_aspect = self.frame.width as f64 / self.frame.height as f64;
+        let term_aspect = pixel_w as f64 / pixel_h as f64;
 
-            // Decode JPEG → RGB
-            if let Ok(pixels) = decode_jpeg_to_argb(&frame.jpeg_data, fw, fh) {
-                // Resize if dimensions changed
-                if fw != width || fh != height {
-                    width = fw;
-                    height = fh;
+        let (render_w, render_h) = if frame_aspect > term_aspect {
+            // Frame is wider — fit to width
+            let rw = pixel_w;
+            let rh = (pixel_w as f64 / frame_aspect) as u32;
+            (rw, rh)
+        } else {
+            // Frame is taller — fit to height
+            let rh = pixel_h;
+            let rw = (pixel_h as f64 * frame_aspect) as u32;
+            (rw, rh)
+        };
+
+        // Center the image in the available area
+        let x_offset = (pixel_w.saturating_sub(render_w)) / 2;
+        let y_offset = (pixel_h.saturating_sub(render_h)) / 2;
+
+        // The half-block character: top half is foreground, bottom half is background
+        let half_block = "▀";
+
+        for ty in 0..term_h {
+            for tx in 0..term_w {
+                let px = tx;
+                let py_top = ty * 2;
+                let py_bot = ty * 2 + 1;
+
+                // Map terminal pixel position to source frame position
+                let (top_r, top_g, top_b) = sample_pixel(
+                    self.frame,
+                    px,
+                    py_top,
+                    x_offset,
+                    y_offset,
+                    render_w,
+                    render_h,
+                );
+                let (bot_r, bot_g, bot_b) = sample_pixel(
+                    self.frame,
+                    px,
+                    py_bot,
+                    x_offset,
+                    y_offset,
+                    render_w,
+                    render_h,
+                );
+
+                let cell_x = area.x + tx as u16;
+                let cell_y = area.y + ty as u16;
+
+                if cell_x < area.x + area.width && cell_y < area.y + area.height {
+                    let cell = &mut buf[(cell_x, cell_y)];
+                    cell.set_symbol(half_block);
+                    cell.set_style(
+                        Style::default()
+                            .fg(Color::Rgb(top_r, top_g, top_b))
+                            .bg(Color::Rgb(bot_r, bot_g, bot_b)),
+                    );
                 }
-                buffer = pixels;
             }
         }
-
-        // Update window
-        let _ = window.update_with_buffer(&buffer, width, height);
     }
-
-    running.store(false, Ordering::Relaxed);
 }
 
-/// Decode JPEG data to a Vec<u32> in 0x00RRGGBB format (what minifb expects)
-fn decode_jpeg_to_argb(jpeg_data: &[u8], _width: usize, _height: usize) -> Result<Vec<u32>> {
-    let cursor = Cursor::new(jpeg_data);
-    let decoder = JpegDecoder::new(cursor)
-        .map_err(|e| anyhow::anyhow!("JPEG decode failed: {}", e))?;
-
-    let (dw, dh) = decoder.dimensions();
-    let total_bytes = decoder.total_bytes() as usize;
-
-    let mut rgb_buf = vec![0u8; total_bytes];
-    decoder
-        .read_image(&mut rgb_buf)
-        .map_err(|e| anyhow::anyhow!("JPEG read failed: {}", e))?;
-
-    let actual_w = dw as usize;
-    let actual_h = dh as usize;
-    let pixel_count = actual_w * actual_h;
-
-    let mut argb = Vec::with_capacity(pixel_count);
-    for i in 0..pixel_count {
-        let offset = i * 3;
-        if offset + 2 < rgb_buf.len() {
-            let r = rgb_buf[offset] as u32;
-            let g = rgb_buf[offset + 1] as u32;
-            let b = rgb_buf[offset + 2] as u32;
-            argb.push((r << 16) | (g << 8) | b);
-        } else {
-            argb.push(0);
-        }
+/// Sample a pixel from the frame, mapping terminal pixel coords to source coords.
+/// Returns black for pixels outside the rendered area (letterbox/pillarbox).
+fn sample_pixel(
+    frame: &DecodedFrame,
+    px: u32,
+    py: u32,
+    x_offset: u32,
+    y_offset: u32,
+    render_w: u32,
+    render_h: u32,
+) -> (u8, u8, u8) {
+    // Check if this pixel is in the rendered area
+    if px < x_offset || py < y_offset {
+        return (0, 0, 0);
+    }
+    let rx = px - x_offset;
+    let ry = py - y_offset;
+    if rx >= render_w || ry >= render_h {
+        return (0, 0, 0);
     }
 
-    Ok(argb)
+    // Map to source frame coordinates (nearest-neighbor sampling)
+    let src_x = (rx as u64 * frame.width as u64 / render_w as u64) as u32;
+    let src_y = (ry as u64 * frame.height as u64 / render_h as u64) as u32;
+
+    frame.pixel(src_x, src_y)
 }

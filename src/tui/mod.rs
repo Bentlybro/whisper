@@ -64,9 +64,12 @@ pub struct ChatUI {
     pub(crate) screen_capture: Option<crate::screen::capture::ScreenCapture>,
     pub(crate) screen_capture_rx: Option<mpsc::UnboundedReceiver<crate::screen::ScreenFrameData>>,
     pub(crate) screen_share_target: Option<String>, // peer_id we're sharing to
-    pub(crate) screen_viewer: Option<crate::screen::viewer::ScreenViewer>,
     pub(crate) screen_viewer_from: Option<String>, // peer_id sharing with us
     pub(crate) pending_screen_share_from: Option<String>, // incoming screen share request
+    /// Current frame to render in TUI (shared by both sharer preview & viewer)
+    pub(crate) screen_frame: Option<crate::screen::viewer::DecodedFrame>,
+    /// Whether we're in screen share view mode (full-screen frame display)
+    pub(crate) screen_view_active: bool,
 }
 
 impl ChatUI {
@@ -103,9 +106,10 @@ impl ChatUI {
             screen_capture: None,
             screen_capture_rx: None,
             screen_share_target: None,
-            screen_viewer: None,
             screen_viewer_from: None,
             pending_screen_share_from: None,
+            screen_frame: None,
+            screen_view_active: false,
         }
     }
 
@@ -303,6 +307,17 @@ impl ChatUI {
             if event::poll(std::time::Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
+                        // Toggle screen share view with Escape
+                        if self.screen_view_active && key.code == KeyCode::Esc {
+                            self.screen_view_active = false;
+                            continue;
+                        }
+                        // Re-enter screen share view with F5 (when a share session exists)
+                        if key.code == KeyCode::F(5) && (self.screen_share_target.is_some() || self.screen_viewer_from.is_some()) {
+                            self.screen_view_active = !self.screen_view_active;
+                            continue;
+                        }
+
                         // Handle autocomplete navigation first
                         if self.autocomplete.is_some() {
                             match key.code {
@@ -610,42 +625,40 @@ impl ChatUI {
                 }
             }
 
-            // Handle incoming screen frames
+            // Handle incoming screen frames — decode and store for TUI rendering
             while let Ok((from, frame_data)) = screen_in_rx.try_recv() {
                 // Only accept frames from the peer we're viewing
                 let accept = self.screen_viewer_from.as_ref() == Some(&from);
                 if accept {
                     if let Ok(frame) = rmp_serde::from_slice::<crate::screen::ScreenFrameData>(&frame_data) {
-                        if let Some(ref viewer) = self.screen_viewer {
-                            if !viewer.is_running() {
-                                // Viewer window was closed
-                                self.screen_viewer = None;
-                                self.screen_viewer_from = None;
-                                // Notify peer we stopped watching
-                                let stop_msg = PlainMessage::screen_share_stop(self.own_id.clone());
-                                let _ = msg_tx.send(OutgoingMessage::Direct {
-                                    target_id: from.clone(),
-                                    message: stop_msg,
-                                });
-                                let peer_name = self.get_peer_display_name(&from);
-                                self.status = format!("Screen share from {} ended", peer_name);
-                            } else {
-                                viewer.send_frame(frame);
+                        if let Ok(decoded) = crate::screen::viewer::DecodedFrame::from_frame(&frame) {
+                            self.screen_frame = Some(decoded);
+                            // Auto-enter screen view mode on first frame
+                            if !self.screen_view_active {
+                                self.screen_view_active = true;
                             }
                         }
                     }
                 }
             }
 
-            // Send captured screen frames to peer
+            // Send captured screen frames to peer + show local preview
             if let Some(ref target_id) = self.screen_share_target.clone() {
                 if let Some(ref mut capture_rx) = self.screen_capture_rx {
-                    // Drain all, send latest (drop stale frames)
+                    // Drain all, keep latest (drop stale frames)
                     let mut latest = None;
                     while let Ok(frame) = capture_rx.try_recv() {
                         latest = Some(frame);
                     }
                     if let Some(frame) = latest {
+                        // Decode for local preview
+                        if let Ok(decoded) = crate::screen::viewer::DecodedFrame::from_frame(&frame) {
+                            self.screen_frame = Some(decoded);
+                            if !self.screen_view_active {
+                                self.screen_view_active = true;
+                            }
+                        }
+                        // Send to peer
                         if let Ok(serialized) = rmp_serde::to_vec(&frame) {
                             let _ = msg_tx.send(OutgoingMessage::ScreenFrame {
                                 target_id: target_id.clone(),
@@ -655,11 +668,7 @@ impl ChatUI {
                     }
                 }
 
-                // Check if capture is still running
-                if self.screen_capture.is_some() {
-                    // Capture is still alive — nothing to do
-                } else {
-                    // Capture was already cleaned up
+                if !self.screen_capture.is_some() {
                     self.screen_share_target = None;
                 }
             }

@@ -6,6 +6,8 @@ use ratatui::{
     Frame,
 };
 
+use crate::screen::viewer::ScreenWidget;
+
 use super::helpers::format_duration;
 use super::types::{CallType, ReadStatus, Tab};
 use super::ChatUI;
@@ -250,7 +252,95 @@ impl ChatUI {
         }
     }
 
+    /// Render the screen share view — frame takes up most of the terminal
+    fn render_screen_share_view(&self, f: &mut Frame) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(1),   // Frame area
+                Constraint::Length(1), // Status bar
+            ])
+            .split(f.area());
+
+        let frame_area = chunks[0];
+        let status_area = chunks[1];
+
+        // Determine role label
+        let role = if self.screen_share_target.is_some() {
+            let peer_name = self.screen_share_target.as_ref()
+                .map(|id| self.get_peer_display_name(id))
+                .unwrap_or_else(|| "unknown".to_string());
+            format!("📤 Sharing your screen with {}", peer_name)
+        } else if self.screen_viewer_from.is_some() {
+            let peer_name = self.screen_viewer_from.as_ref()
+                .map(|id| self.get_peer_display_name(id))
+                .unwrap_or_else(|| "unknown".to_string());
+            format!("📥 Viewing {}'s screen", peer_name)
+        } else {
+            "Screen Share".to_string()
+        };
+
+        // Render the frame
+        if let Some(ref decoded) = self.screen_frame {
+            // Frame block with title
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(
+                    format!(" 🖥️  {} ", role),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ))
+                .border_style(Style::default().fg(Color::DarkGray));
+
+            let inner = block.inner(frame_area);
+            f.render_widget(block, frame_area);
+
+            // Render the screen content with half-block characters
+            let widget = ScreenWidget::new(decoded);
+            f.render_widget(widget, inner);
+        } else {
+            // No frame yet — show waiting message
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(
+                    format!(" 🖥️  {} ", role),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ))
+                .border_style(Style::default().fg(Color::DarkGray));
+
+            let inner = block.inner(frame_area);
+            f.render_widget(block, frame_area);
+
+            let waiting = Paragraph::new("Waiting for frames...")
+                .style(Style::default().fg(Color::DarkGray));
+            f.render_widget(waiting, inner);
+        }
+
+        // Status bar
+        let status = Paragraph::new(Line::from(vec![
+            Span::styled(" Esc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" toggle chat │ "),
+            Span::styled("/stop-share", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" to end │ "),
+            Span::styled(
+                if let Some(ref frame) = self.screen_frame {
+                    format!("{}×{}", frame.width, frame.height)
+                } else {
+                    "—".to_string()
+                },
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]))
+        .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+        f.render_widget(status, status_area);
+    }
+
     pub(crate) fn ui(&self, f: &mut Frame) {
+        // If screen share view is active, render the frame full-screen with a small status bar
+        if self.screen_view_active {
+            self.render_screen_share_view(f);
+            return;
+        }
+
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([

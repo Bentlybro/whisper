@@ -3,7 +3,6 @@ use tokio::sync::mpsc;
 use crate::client::OutgoingMessage;
 use crate::protocol::PlainMessage;
 use crate::screen::capture::ScreenCapture;
-use crate::screen::viewer::ScreenViewer;
 
 use super::types::Tab;
 use super::ChatUI;
@@ -54,6 +53,8 @@ impl ChatUI {
             }
             self.screen_capture = None;
             self.screen_capture_rx = None;
+            self.screen_frame = None;
+            self.screen_view_active = false;
 
             // Notify peer
             let stop_msg = PlainMessage::screen_share_stop(self.own_id.clone());
@@ -68,10 +69,8 @@ impl ChatUI {
             self.add_system_message(&dm_tab, "Screen sharing stopped".to_string());
         } else if let Some(from_id) = self.screen_viewer_from.take() {
             // Stop viewing
-            if let Some(ref viewer) = self.screen_viewer {
-                viewer.stop();
-            }
-            self.screen_viewer = None;
+            self.screen_frame = None;
+            self.screen_view_active = false;
 
             // Notify peer we stopped watching
             let stop_msg = PlainMessage::screen_share_stop(self.own_id.clone());
@@ -108,19 +107,11 @@ impl ChatUI {
             message: accept_msg,
         });
 
-        // Start the viewer window
-        match ScreenViewer::start(peer_name.clone()) {
-            Ok(viewer) => {
-                self.screen_viewer = Some(viewer);
-                self.screen_viewer_from = Some(peer_id.clone());
-                self.status = format!("🖥️  Viewing {}'s screen (Esc in window to close)", peer_name);
-                let dm_tab = Tab::DirectMessage(peer_id);
-                self.add_system_message(&dm_tab, format!("🖥️  Now viewing {}'s screen", peer_name));
-            }
-            Err(e) => {
-                self.status = format!("❌ Failed to open viewer: {}", e);
-            }
-        }
+        // Set up to receive frames — screen_view_active will be set on first frame
+        self.screen_viewer_from = Some(peer_id.clone());
+        self.status = format!("🖥️  Waiting for {}'s screen... (F5 to toggle view)", peer_name);
+        let dm_tab = Tab::DirectMessage(peer_id);
+        self.add_system_message(&dm_tab, format!("🖥️  Accepted screen share — waiting for frames..."));
     }
 
     pub(crate) fn handle_reject_screen_command(
@@ -148,10 +139,7 @@ impl ChatUI {
     }
 
     /// Handle incoming screen share request
-    pub(crate) fn handle_incoming_screen_request(
-        &mut self,
-        msg: &PlainMessage,
-    ) {
+    pub(crate) fn handle_incoming_screen_request(&mut self, msg: &PlainMessage) {
         let peer_name = self.get_peer_display_name(&msg.sender);
         self.pending_screen_share_from = Some(msg.sender.clone());
         self.status = format!(
@@ -175,11 +163,7 @@ impl ChatUI {
     }
 
     /// Handle screen share accept/reject response
-    pub(crate) fn handle_screen_share_response(
-        &mut self,
-        msg: &PlainMessage,
-        accept: bool,
-    ) {
+    pub(crate) fn handle_screen_share_response(&mut self, msg: &PlainMessage, accept: bool) {
         let peer_name = self.get_peer_display_name(&msg.sender);
         let dm_tab = Tab::DirectMessage(msg.sender.clone());
 
@@ -190,7 +174,10 @@ impl ChatUI {
                     self.screen_capture_rx = capture.take_frame_rx();
                     self.screen_capture = Some(capture);
                     self.screen_share_target = Some(msg.sender.clone());
-                    self.status = format!("🖥️  Sharing screen with {} | /stop-share to end", peer_name);
+                    self.status = format!(
+                        "🖥️  Sharing screen with {} | /stop-share to end | F5 toggle view",
+                        peer_name
+                    );
                     self.add_system_message(
                         &dm_tab,
                         format!("🖥️  Now sharing screen with {}", peer_name),
@@ -208,10 +195,7 @@ impl ChatUI {
     }
 
     /// Handle screen share stop notification from peer
-    pub(crate) fn handle_screen_share_stop(
-        &mut self,
-        msg: &PlainMessage,
-    ) {
+    pub(crate) fn handle_screen_share_stop(&mut self, msg: &PlainMessage) {
         let peer_name = self.get_peer_display_name(&msg.sender);
 
         // If we were sharing TO this peer, stop capture
@@ -222,21 +206,24 @@ impl ChatUI {
             self.screen_capture = None;
             self.screen_capture_rx = None;
             self.screen_share_target = None;
+            self.screen_frame = None;
+            self.screen_view_active = false;
             self.status = format!("{} stopped watching your screen", peer_name);
             let dm_tab = Tab::DirectMessage(msg.sender.clone());
             self.add_system_message(&dm_tab, format!("{} stopped watching", peer_name));
         }
 
-        // If we were viewing this peer's screen, stop viewer
+        // If we were viewing this peer's screen, stop
         if self.screen_viewer_from.as_ref() == Some(&msg.sender) {
-            if let Some(ref viewer) = self.screen_viewer {
-                viewer.stop();
-            }
-            self.screen_viewer = None;
             self.screen_viewer_from = None;
+            self.screen_frame = None;
+            self.screen_view_active = false;
             self.status = format!("{} stopped sharing their screen", peer_name);
             let dm_tab = Tab::DirectMessage(msg.sender.clone());
-            self.add_system_message(&dm_tab, format!("{} stopped sharing their screen", peer_name));
+            self.add_system_message(
+                &dm_tab,
+                format!("{} stopped sharing their screen", peer_name),
+            );
         }
     }
 }

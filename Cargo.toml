@@ -43,7 +43,6 @@ audiopus = "0.3.0-rc.0"
 
 # Screen sharing
 scrap = "0.5"
-minifb = "0.28"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 # Utilities
