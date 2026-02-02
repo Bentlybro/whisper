@@ -632,9 +632,10 @@ impl ChatUI {
                 if accept {
                     if let Ok(frame) = rmp_serde::from_slice::<crate::screen::ScreenFrameData>(&frame_data) {
                         if let Ok(decoded) = crate::screen::viewer::DecodedFrame::from_frame(&frame) {
+                            let is_first_frame = self.screen_frame.is_none();
                             self.screen_frame = Some(decoded);
-                            // Auto-enter screen view mode on first frame
-                            if !self.screen_view_active {
+                            // Only auto-enter on the FIRST frame, not every frame
+                            if is_first_frame {
                                 self.screen_view_active = true;
                             }
                         }
@@ -653,8 +654,10 @@ impl ChatUI {
                     if let Some(frame) = latest {
                         // Decode for local preview
                         if let Ok(decoded) = crate::screen::viewer::DecodedFrame::from_frame(&frame) {
+                            let is_first_frame = self.screen_frame.is_none();
                             self.screen_frame = Some(decoded);
-                            if !self.screen_view_active {
+                            // Only auto-enter on first frame
+                            if is_first_frame {
                                 self.screen_view_active = true;
                             }
                         }

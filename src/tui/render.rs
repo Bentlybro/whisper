@@ -258,12 +258,14 @@ impl ChatUI {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(1),   // Frame area
+                Constraint::Length(3), // Input area
                 Constraint::Length(1), // Status bar
             ])
             .split(f.area());
 
         let frame_area = chunks[0];
-        let status_area = chunks[1];
+        let input_area = chunks[1];
+        let status_area = chunks[2];
 
         // Determine role label
         let role = if self.screen_share_target.is_some() {
@@ -315,12 +317,32 @@ impl ChatUI {
             f.render_widget(waiting, inner);
         }
 
+        // Input box — so user can type /stop-share without leaving screen view
+        let input_text: String = self.input.iter().collect();
+        let input_widget = Paragraph::new(input_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray))
+                    .title(Span::styled(
+                        " Type here (Esc=chat) ",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+            )
+            .style(Style::default().fg(Color::White));
+        f.render_widget(input_widget, input_area);
+
+        // Place cursor in input area
+        let inner_w = if input_area.width > 2 { input_area.width as usize - 2 } else { 1 };
+        let (cx, cy) = Self::cursor_position(&self.input, self.cursor, inner_w);
+        f.set_cursor_position((input_area.x + 1 + cx, input_area.y + 1 + cy));
+
         // Status bar
         let status = Paragraph::new(Line::from(vec![
             Span::styled(" Esc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw(" toggle chat │ "),
-            Span::styled("/stop-share", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw(" to end │ "),
+            Span::raw(" chat │ "),
+            Span::styled("F5", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" toggle view │ "),
             Span::styled(
                 if let Some(ref frame) = self.screen_frame {
                     format!("{}×{}", frame.width, frame.height)

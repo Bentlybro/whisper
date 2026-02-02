@@ -16,8 +16,10 @@ pub struct ScreenFrameData {
 
 /// Max resolution for captured frames (width).
 /// Frames are downscaled to fit this while preserving aspect ratio.
-pub const MAX_CAPTURE_WIDTH: u32 = 1280;
+/// Higher = sharper but more bandwidth. Terminal rendering is low-res anyway,
+/// but more source pixels means better color accuracy when downsampled.
+pub const MAX_CAPTURE_WIDTH: u32 = 1920;
 /// Target frames per second
-pub const TARGET_FPS: u32 = 8;
-/// JPEG quality (1-100)
-pub const JPEG_QUALITY: u8 = 60;
+pub const TARGET_FPS: u32 = 10;
+/// JPEG quality (1-100). Higher = sharper, more bandwidth.
+pub const JPEG_QUALITY: u8 = 80;
