@@ -174,8 +174,10 @@ impl ChatUI {
         }
     }
 
-    /// Send typing indicator to current tab's peers (debounced)
+        /// Send typing indicator to current tab's peers (debounced, bypasses ratchet)
     fn send_typing_indicator(&mut self, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        use crate::protocol::Message;
+        
         let now = std::time::Instant::now();
         // Debounce: only send every 3 seconds
         if let Some(last) = self.last_typing_sent {
@@ -188,33 +190,40 @@ impl ChatUI {
         let current_tab = &self.tabs[self.active_tab].clone();
         match current_tab {
             Tab::DirectMessage(peer_id) => {
-                let typing_msg = PlainMessage::typing(self.own_id.clone(), true, true);
-                let _ = msg_tx.send(OutgoingMessage::Direct {
-                    target_id: peer_id.clone(),
-                    message: typing_msg,
-                });
+                let _ = msg_tx.send(OutgoingMessage::Signal(Message::Typing {
+                    from: self.own_id.clone(),
+                    target: peer_id.clone(),
+                    is_typing: true,
+                }));
             }
             Tab::Group(group_id) => {
                 if let Some(group) = self.groups.get(group_id) {
-                    let mut typing_msg = PlainMessage::typing(self.own_id.clone(), true, false);
-                    typing_msg.group_id = Some(group_id.clone());
-                    let member_ids = group.members.clone();
-                    let _ = msg_tx.send(OutgoingMessage::Group {
-                        group_id: group_id.clone(),
-                        member_ids,
-                        message: typing_msg,
-                    });
+                    for member_id in &group.members {
+                        let _ = msg_tx.send(OutgoingMessage::Signal(Message::Typing {
+                            from: self.own_id.clone(),
+                            target: member_id.clone(),
+                            is_typing: true,
+                        }));
+                    }
                 }
             }
             Tab::Global => {
-                let typing_msg = PlainMessage::typing(self.own_id.clone(), true, false);
-                let _ = msg_tx.send(OutgoingMessage::Global(typing_msg));
+                // Send to all peers
+                for peer_id in self.peers.keys() {
+                    let _ = msg_tx.send(OutgoingMessage::Signal(Message::Typing {
+                        from: self.own_id.clone(),
+                        target: peer_id.clone(),
+                        is_typing: true,
+                    }));
+                }
             }
         }
     }
 
-    /// Send read receipts for visible messages in the current tab
+    /// Send read receipts for visible messages in the current tab (bypasses ratchet)
     fn send_read_receipts(&mut self, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        use crate::protocol::Message;
+        
         let current_tab = self.tabs[self.active_tab].clone();
         let messages = match self.messages.get(&current_tab) {
             Some(msgs) => msgs.clone(),
@@ -229,33 +238,14 @@ impl ChatUI {
                 if self.read_status.get(msg_id) == Some(&ReadStatus::Read) {
                     continue; // Already sent read receipt
                 }
-                // Mark as read and send receipt
+                // Mark as read and send receipt via signal (no ratchet)
                 self.read_status.insert(msg_id.clone(), ReadStatus::Read);
 
-                let is_direct = msg.direct;
-                let receipt = PlainMessage::read_receipt(self.own_id.clone(), msg_id.clone(), is_direct);
-
-                match &current_tab {
-                    Tab::DirectMessage(peer_id) => {
-                        let _ = msg_tx.send(OutgoingMessage::Direct {
-                            target_id: peer_id.clone(),
-                            message: receipt,
-                        });
-                    }
-                    Tab::Group(_group_id) => {
-                        // Send receipt directly to the sender
-                        let _ = msg_tx.send(OutgoingMessage::Direct {
-                            target_id: msg.sender.clone(),
-                            message: receipt,
-                        });
-                    }
-                    Tab::Global => {
-                        let _ = msg_tx.send(OutgoingMessage::Direct {
-                            target_id: msg.sender.clone(),
-                            message: receipt,
-                        });
-                    }
-                }
+                let _ = msg_tx.send(OutgoingMessage::Signal(Message::ReadReceipt {
+                    from: self.own_id.clone(),
+                    target: msg.sender.clone(),
+                    message_id: msg_id.clone(),
+                }));
             }
         }
     }

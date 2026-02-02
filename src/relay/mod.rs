@@ -142,6 +142,23 @@ async fn handle_connection(stream: TcpStream, peers: PeerMap, rooms: RoomMap) ->
                             }
                         }
                     }
+                    Message::Typing { ref target, .. } | Message::ReadReceipt { ref target, .. } => {
+                        // Forward lightweight signals to target peer (no encryption)
+                        if !target.is_empty() {
+                            let peers_read = peers.read().await;
+                            if let Some(peer_tx) = peers_read.get(target) {
+                                let _ = peer_tx.send(data.clone());
+                            }
+                        } else {
+                            // Broadcast to all
+                            let peers_read = peers.read().await;
+                            for (sid, peer_tx) in peers_read.iter() {
+                                if Some(sid) != session_id.as_ref() {
+                                    let _ = peer_tx.send(data.clone());
+                                }
+                            }
+                        }
+                    }
                     Message::GroupJoin { session_id: sid, group_id } => {
                         // Add session to the group room
                         let mut rooms_write = rooms.write().await;

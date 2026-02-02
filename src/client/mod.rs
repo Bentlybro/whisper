@@ -42,6 +42,8 @@ pub enum OutgoingMessage {
     LeaveRoom { group_id: String },
     /// Send an encrypted audio frame (raw, no PlainMessage overhead)
     Audio { target_id: String, data: Vec<u8> },
+    /// Lightweight signal — bypasses ratchet, sent as plaintext
+    Signal(crate::protocol::Message),
 }
 
 pub struct ChatClient {
@@ -414,6 +416,18 @@ impl ChatClient {
                                         }
                                     }
                                 }
+                                Message::Typing { from, target: _, is_typing } => {
+                                    if from == session_id_recv { continue; }
+                                    // Convert to PlainMessage for TUI
+                                    let mut msg = PlainMessage::typing(from, is_typing, false);
+                                    msg.system = true;
+                                    let _ = incoming_tx.send(msg);
+                                }
+                                Message::ReadReceipt { from, target: _, message_id } => {
+                                    if from == session_id_recv { continue; }
+                                    let msg = PlainMessage::read_receipt(from, message_id, false);
+                                    let _ = incoming_tx.send(msg);
+                                }
                                 _ => {}
                             }
                         }
@@ -622,6 +636,15 @@ impl ChatClient {
                                                     break;
                                                 }
                                             }
+                                        }
+                                    }
+                                }
+                                OutgoingMessage::Signal(message) => {
+                                    // Send directly without encryption
+                                    if let Ok(data) = bincode::serialize(&message) {
+                                        if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
+                                            let _ = failure_tx_send.send("Send failed".to_string());
+                                            break;
                                         }
                                     }
                                 }

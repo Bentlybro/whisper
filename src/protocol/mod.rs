@@ -52,6 +52,19 @@ pub enum Message {
         nonce: Vec<u8>,
         ciphertext: Vec<u8>,
     },
+    /// Lightweight typing indicator — NOT encrypted, doesn't touch the ratchet
+    Typing {
+        from: String,
+        /// Target peer (empty = broadcast)
+        target: String,
+        is_typing: bool,
+    },
+    /// Lightweight read receipt — NOT encrypted, doesn't touch the ratchet
+    ReadReceipt {
+        from: String,
+        target: String,
+        message_id: String,
+    },
 }
 
 /// File offer metadata
