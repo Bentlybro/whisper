@@ -54,6 +54,7 @@ impl ChatUI {
             self.screen_capture = None;
             self.screen_capture_rx = None;
             self.screen_frame = None;
+            self.screen_protocol = None;
             self.screen_view_active = false;
 
             // Notify peer
@@ -70,6 +71,7 @@ impl ChatUI {
         } else if let Some(from_id) = self.screen_viewer_from.take() {
             // Stop viewing
             self.screen_frame = None;
+            self.screen_protocol = None;
             self.screen_view_active = false;
 
             // Notify peer we stopped watching
@@ -207,6 +209,7 @@ impl ChatUI {
             self.screen_capture_rx = None;
             self.screen_share_target = None;
             self.screen_frame = None;
+            self.screen_protocol = None;
             self.screen_view_active = false;
             self.status = format!("{} stopped watching your screen", peer_name);
             let dm_tab = Tab::DirectMessage(msg.sender.clone());
@@ -217,6 +220,7 @@ impl ChatUI {
         if self.screen_viewer_from.as_ref() == Some(&msg.sender) {
             self.screen_viewer_from = None;
             self.screen_frame = None;
+            self.screen_protocol = None;
             self.screen_view_active = false;
             self.status = format!("{} stopped sharing their screen", peer_name);
             let dm_tab = Tab::DirectMessage(msg.sender.clone());

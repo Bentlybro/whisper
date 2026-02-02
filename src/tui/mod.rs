@@ -68,12 +68,16 @@ pub struct ChatUI {
     pub(crate) pending_screen_share_from: Option<String>, // incoming screen share request
     /// Current frame to render in TUI (shared by both sharer preview & viewer)
     pub(crate) screen_frame: Option<crate::screen::viewer::DecodedFrame>,
+    /// ratatui-image protocol state for rendering (created from each new frame)
+    pub(crate) screen_protocol: Option<ratatui_image::protocol::StatefulProtocol>,
+    /// Terminal graphics protocol picker (Sixel/Kitty/iTerm2/halfblocks)
+    pub(crate) image_picker: ratatui_image::picker::Picker,
     /// Whether we're in screen share view mode (full-screen frame display)
     pub(crate) screen_view_active: bool,
 }
 
 impl ChatUI {
-    pub fn new(own_id: String, nickname: Option<String>, own_public_key: Vec<u8>) -> Self {
+    pub fn new(own_id: String, nickname: Option<String>, own_public_key: Vec<u8>, image_picker: ratatui_image::picker::Picker) -> Self {
         let mut messages = HashMap::new();
         messages.insert(Tab::Global, Vec::new());
 
@@ -109,6 +113,8 @@ impl ChatUI {
             screen_viewer_from: None,
             pending_screen_share_from: None,
             screen_frame: None,
+            screen_protocol: None,
+            image_picker,
             screen_view_active: false,
         }
     }
@@ -633,8 +639,10 @@ impl ChatUI {
                     if let Ok(frame) = rmp_serde::from_slice::<crate::screen::ScreenFrameData>(&frame_data) {
                         if let Ok(decoded) = crate::screen::viewer::DecodedFrame::from_frame(&frame) {
                             let is_first_frame = self.screen_frame.is_none();
+                            // Create ratatui-image protocol for rendering
+                            let protocol = decoded.to_protocol(&mut self.image_picker);
+                            self.screen_protocol = Some(protocol);
                             self.screen_frame = Some(decoded);
-                            // Only auto-enter on the FIRST frame, not every frame
                             if is_first_frame {
                                 self.screen_view_active = true;
                             }
@@ -655,8 +663,9 @@ impl ChatUI {
                         // Decode for local preview
                         if let Ok(decoded) = crate::screen::viewer::DecodedFrame::from_frame(&frame) {
                             let is_first_frame = self.screen_frame.is_none();
+                            let protocol = decoded.to_protocol(&mut self.image_picker);
+                            self.screen_protocol = Some(protocol);
                             self.screen_frame = Some(decoded);
-                            // Only auto-enter on first frame
                             if is_first_frame {
                                 self.screen_view_active = true;
                             }

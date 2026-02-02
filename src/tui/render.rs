@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::screen::viewer::ScreenWidget;
+use ratatui_image::StatefulImage;
 
 use super::helpers::format_duration;
 use super::types::{CallType, ReadStatus, Tab};
@@ -253,7 +253,7 @@ impl ChatUI {
     }
 
     /// Render the screen share view — frame takes up most of the terminal
-    fn render_screen_share_view(&self, f: &mut Frame) {
+    fn render_screen_share_view(&mut self, f: &mut Frame) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -282,8 +282,8 @@ impl ChatUI {
             "Screen Share".to_string()
         };
 
-        // Render the frame
-        if let Some(ref decoded) = self.screen_frame {
+        // Render the frame using ratatui-image (Sixel/Kitty/iTerm2/halfblocks)
+        if self.screen_protocol.is_some() {
             // Frame block with title
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -296,9 +296,11 @@ impl ChatUI {
             let inner = block.inner(frame_area);
             f.render_widget(block, frame_area);
 
-            // Render the screen content with half-block characters
-            let widget = ScreenWidget::new(decoded);
-            f.render_widget(widget, inner);
+            // Render with the detected terminal graphics protocol
+            let image_widget = StatefulImage::default();
+            if let Some(ref mut protocol) = self.screen_protocol {
+                f.render_stateful_widget(image_widget, inner, protocol);
+            }
         } else {
             // No frame yet — show waiting message
             let block = Block::default()
@@ -356,7 +358,7 @@ impl ChatUI {
         f.render_widget(status, status_area);
     }
 
-    pub(crate) fn ui(&self, f: &mut Frame) {
+    pub(crate) fn ui(&mut self, f: &mut Frame) {
         // If screen share view is active, render the frame full-screen with a small status bar
         if self.screen_view_active {
             self.render_screen_share_view(f);

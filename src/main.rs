@@ -115,10 +115,14 @@ async fn start_chat(relay_url: &str, identity_path: &PathBuf, _save_history: boo
     println!("Starting TUI...");
     println!();
 
+    // Query terminal capabilities BEFORE entering raw mode / alternate screen.
+    // This detects Sixel, Kitty, iTerm2 protocols and font size.
+    let picker = screen::viewer::create_picker();
+
     // Small delay to let connection establish
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let mut ui = tui::ChatUI::new(session_id, nickname, own_public_key);
+    let mut ui = tui::ChatUI::new(session_id, nickname, own_public_key, picker);
     ui.run(msg_tx, incoming_rx, status_rx, peer_update_rx, audio_in_rx, screen_in_rx).await?;
 
     Ok(())
