@@ -7,8 +7,16 @@ pub enum Message {
     Connect { session_id: String },
     /// Peer discovery
     Discover { target_session: String },
-    /// Key exchange message (contains public key)
-    KeyExchange { from: String, public_key: Vec<u8> },
+    /// Key exchange message (contains identity public key + ephemeral DH ratchet key)
+    KeyExchange {
+        from: String,
+        public_key: Vec<u8>,
+        /// Initial ephemeral DH public key for the Double Ratchet.
+        /// Lets the peer set dh_remote immediately so subsequent DH ratchet
+        /// steps (where the sender generates a NEW key) are detectable.
+        #[serde(default)]
+        dh_ratchet_key: Vec<u8>,
+    },
     /// Encrypted message payload
     Encrypted {
         from: String,

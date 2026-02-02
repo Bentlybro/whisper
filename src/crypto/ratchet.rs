@@ -163,6 +163,15 @@ impl RatchetSession {
         self.dh_self_public
     }
 
+    /// Set the remote peer's initial DH public key (from key exchange).
+    /// This lets us detect when they do a DH ratchet step (their key changes),
+    /// which is critical for the first message after Alice's initial ratchet.
+    pub fn set_remote_dh(&mut self, remote_dh: [u8; 32]) {
+        if self.dh_remote.is_none() {
+            self.dh_remote = Some(remote_dh);
+        }
+    }
+
     /// Encrypt a plaintext message, returning (header, nonce, ciphertext).
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<(RatchetHeader, Vec<u8>, Vec<u8>)> {
         // If we're Alice, have received their DH key, and haven't done the initial
@@ -420,7 +429,13 @@ mod tests {
         let mut alice = RatchetSession::init(&shared, true);
         let mut bob = RatchetSession::init(&shared, false);
 
-        // Alice sends, Bob receives (using pre-derived symmetric chains)
+        // Exchange initial DH keys (simulates KE reply carrying dh_ratchet_key)
+        let alice_dh = alice.public_key();
+        let bob_dh = bob.public_key();
+        alice.set_remote_dh(bob_dh);
+        bob.set_remote_dh(alice_dh);
+
+        // Alice sends, Bob receives
         let (header, nonce, ct) = alice.encrypt(b"hello from alice").unwrap();
         let pt = bob.decrypt(&header, &nonce, &ct).unwrap();
         assert_eq!(pt, b"hello from alice");
@@ -432,10 +447,47 @@ mod tests {
     }
 
     #[test]
+    fn test_bob_sends_first_then_alice_replies() {
+        // This was the original bug: Bob sends first, Alice replies with
+        // a ratcheted chain, Bob can't decrypt.
+        let shared = [42u8; 32];
+        let mut alice = RatchetSession::init(&shared, true);
+        let mut bob = RatchetSession::init(&shared, false);
+
+        // Exchange initial DH keys (from KE handshake)
+        let alice_dh = alice.public_key();
+        let bob_dh = bob.public_key();
+        alice.set_remote_dh(bob_dh);
+        bob.set_remote_dh(alice_dh);
+
+        // Bob sends first
+        let (header, nonce, ct) = bob.encrypt(b"hey").unwrap();
+        let pt = alice.decrypt(&header, &nonce, &ct).unwrap();
+        assert_eq!(pt, b"hey");
+
+        // Alice replies — this triggers her initial ratchet_send
+        let (header, nonce, ct) = alice.encrypt(b"hey back").unwrap();
+        // Bob must detect the DH key change and do ratchet_recv
+        let pt = bob.decrypt(&header, &nonce, &ct).unwrap();
+        assert_eq!(pt, b"hey back");
+
+        // Continue conversation
+        let (header, nonce, ct) = bob.encrypt(b"how are you?").unwrap();
+        let pt = alice.decrypt(&header, &nonce, &ct).unwrap();
+        assert_eq!(pt, b"how are you?");
+    }
+
+    #[test]
     fn test_multiple_messages() {
         let shared = [42u8; 32];
         let mut alice = RatchetSession::init(&shared, true);
         let mut bob = RatchetSession::init(&shared, false);
+
+        // Exchange initial DH keys
+        let alice_dh = alice.public_key();
+        let bob_dh = bob.public_key();
+        alice.set_remote_dh(bob_dh);
+        bob.set_remote_dh(alice_dh);
 
         for i in 0..10 {
             let msg = format!("alice msg {}", i);
@@ -458,6 +510,12 @@ mod tests {
         let mut alice = RatchetSession::init(&shared, true);
         let mut bob = RatchetSession::init(&shared, false);
 
+        // Exchange initial DH keys
+        let alice_dh = alice.public_key();
+        let bob_dh = bob.public_key();
+        alice.set_remote_dh(bob_dh);
+        bob.set_remote_dh(alice_dh);
+
         // Alice → Bob
         let (h, n, c) = alice.encrypt(b"a1").unwrap();
         assert_eq!(bob.decrypt(&h, &n, &c).unwrap(), b"a1");
@@ -473,6 +531,26 @@ mod tests {
         // Bob → Alice again
         let (h, n, c) = bob.encrypt(b"b2").unwrap();
         assert_eq!(alice.decrypt(&h, &n, &c).unwrap(), b"b2");
+    }
+
+    #[test]
+    fn test_no_dh_exchange_symmetric_still_works() {
+        // Without DH key exchange (legacy/fallback), symmetric chains work
+        // as long as Alice doesn't trigger the initial ratchet
+        let shared = [42u8; 32];
+        let mut alice = RatchetSession::init(&shared, true);
+        let mut bob = RatchetSession::init(&shared, false);
+
+        // Alice sends FIRST (before receiving from Bob, so dh_remote is None)
+        // → no initial ratchet triggered → uses symmetric chain
+        let (header, nonce, ct) = alice.encrypt(b"alice first").unwrap();
+        let pt = bob.decrypt(&header, &nonce, &ct).unwrap();
+        assert_eq!(pt, b"alice first");
+
+        // Bob replies
+        let (header, nonce, ct) = bob.encrypt(b"bob reply").unwrap();
+        let pt = alice.decrypt(&header, &nonce, &ct).unwrap();
+        assert_eq!(pt, b"bob reply");
     }
 
     #[test]

@@ -185,10 +185,13 @@ impl ChatClient {
         let data = bincode::serialize(&connect_msg)?;
         ws_sender.send(WsMessage::Binary(data)).await?;
 
-        // Send key exchange to re-establish E2EE with all peers
+        // Send key exchange to re-establish E2EE with all peers.
+        // Initial broadcast has no dh_ratchet_key (ratchet doesn't exist yet).
+        // The reply KE (sent after ratchet creation) will include our ratchet DH key.
         let key_exchange_msg = Message::KeyExchange {
             from: session_id.to_string(),
             public_key: public_key_bytes.to_vec(),
+            dh_ratchet_key: vec![],
         };
         let ke_data = bincode::serialize(&key_exchange_msg)?;
         ws_sender.send(WsMessage::Binary(ke_data)).await?;
@@ -224,7 +227,7 @@ impl ChatClient {
                                         let _ = status_tx_recv.send("Reconnected".to_string());
                                     }
                                 }
-                                Message::KeyExchange { from, public_key } => {
+                                Message::KeyExchange { from, public_key, dh_ratchet_key } => {
                                     if from == session_id_recv {
                                         continue; // Ignore our own key exchange
                                     }
@@ -239,16 +242,34 @@ impl ChatClient {
                                             let is_alice = session_id_recv < from;
                                             
                                             if is_new_peer {
-                                                let ratchet = RatchetSession::init(&secret, is_alice);
+                                                let mut ratchet = RatchetSession::init(&secret, is_alice);
+                                                
+                                                // If the peer included their ratchet DH key, set it now.
+                                                // This lets us detect when they do a DH ratchet step later
+                                                // (their key changes), which is critical for Alice's initial ratchet.
+                                                if dh_ratchet_key.len() == 32 {
+                                                    let mut key = [0u8; 32];
+                                                    key.copy_from_slice(&dh_ratchet_key);
+                                                    ratchet.set_remote_dh(key);
+                                                }
+                                                
                                                 peers_map.insert(from.clone(), PeerInfo {
                                                     ratchet,
                                                     nickname: None,
                                                     public_key: public_key.clone(),
                                                 });
                                             } else {
-                                                // Already have a ratchet for this peer — ignore duplicate KE
-                                                // Re-creating would reset the ratchet state and desync
-                                                // (both sides send initial KE + reply KE = 2 each, causing double init)
+                                                // Already have a ratchet for this peer.
+                                                // Don't re-create (would reset state and desync),
+                                                // but DO process the dh_ratchet_key if present —
+                                                // this is the reply KE carrying the peer's initial DH key.
+                                                if dh_ratchet_key.len() == 32 {
+                                                    if let Some(peer_info) = peers_map.get_mut(&from) {
+                                                        let mut key = [0u8; 32];
+                                                        key.copy_from_slice(&dh_ratchet_key);
+                                                        peer_info.ratchet.set_remote_dh(key);
+                                                    }
+                                                }
                                                 continue;
                                             }
                                             
@@ -269,11 +290,16 @@ impl ChatClient {
                                                 let _ = incoming_tx.send(join_msg);
                                             }
 
-                                            // Send our public key back so the peer can also complete the exchange
+                                            // Send our public key back with our ratchet DH key
+                                            // so the peer can set dh_remote and detect our future DH ratchets
                                             if is_new_peer {
+                                                let our_dh_key = peers_map.get(&from)
+                                                    .map(|p| p.ratchet.public_key().to_vec())
+                                                    .unwrap_or_default();
                                                 let reply = Message::KeyExchange {
                                                     from: session_id_recv.clone(),
                                                     public_key: public_key_bytes_recv.clone(),
+                                                    dh_ratchet_key: our_dh_key,
                                                 };
                                                 if let Ok(reply_data) = bincode::serialize(&reply) {
                                                     let _ = ke_reply_tx.send(reply_data);
@@ -670,6 +696,7 @@ impl ChatClient {
         let key_exchange = Message::KeyExchange {
             from: self.session_id.clone(),
             public_key: self.identity.public_key_bytes(),
+            dh_ratchet_key: vec![], // No ratchet DH key on initial broadcast
         };
         let data = bincode::serialize(&key_exchange)?;
         ws_sender.send(WsMessage::Binary(data)).await?;
