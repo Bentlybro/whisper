@@ -35,6 +35,10 @@ pub struct ChatUI {
     pub(crate) peers: HashMap<String, PeerDisplay>,
     pub(crate) own_id: String,
     pub(crate) own_nickname: Option<String>,
+    /// Our own identity public key (for safety number computation)
+    pub(crate) own_public_key: Vec<u8>,
+    /// Peers we've manually verified via /verify
+    pub(crate) verified_peers: std::collections::HashSet<String>,
     pub(crate) pending_offers: HashMap<String, PendingFileOffer>,
     pub(crate) active_transfers: HashMap<String, ActiveTransfer>,
     pub(crate) outgoing_transfers: HashMap<String, OutgoingTransfer>,
@@ -48,7 +52,7 @@ pub struct ChatUI {
 }
 
 impl ChatUI {
-    pub fn new(own_id: String, nickname: Option<String>) -> Self {
+    pub fn new(own_id: String, nickname: Option<String>, own_public_key: Vec<u8>) -> Self {
         let mut messages = HashMap::new();
         messages.insert(Tab::Global, Vec::new());
 
@@ -62,6 +66,8 @@ impl ChatUI {
             peers: HashMap::new(),
             own_id,
             own_nickname: nickname,
+            own_public_key,
+            verified_peers: std::collections::HashSet::new(),
             pending_offers: HashMap::new(),
             active_transfers: HashMap::new(),
             outgoing_transfers: HashMap::new(),

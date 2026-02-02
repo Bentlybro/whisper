@@ -1,6 +1,7 @@
 use tokio::sync::mpsc;
 
 use crate::client::OutgoingMessage;
+use crate::crypto::safety_number::compute_safety_number;
 use crate::protocol::PlainMessage;
 
 use super::types::Tab;
@@ -75,6 +76,15 @@ impl ChatUI {
                         self.status = "Not in a call".to_string();
                     }
                 }
+                "verify" => {
+                    self.handle_verify_command(&parts[1..], msg_tx);
+                    return;
+                }
+                "verified" => {
+                    // Mark current verify target as verified
+                    self.handle_mark_verified(&parts[1..]);
+                    return;
+                }
                 "send" | "share" => {
                     if parts.len() < 2 {
                         self.status = "Usage: /send <filepath>".to_string();
@@ -101,7 +111,7 @@ impl ChatUI {
             return;
         }
 
-        // Regular message
+        // Regular message (falls through from command handling above)
         let current_tab = &self.tabs[self.active_tab].clone();
 
         match current_tab {
@@ -133,5 +143,100 @@ impl ChatUI {
                 }
             }
         }
+    }
+
+    /// Handle /verify [nickname|peer_id] — show safety number for a peer
+    /// If no argument, try to use the current DM tab's peer
+    fn handle_verify_command(&mut self, args: &[&str], _msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        let peer_id = if args.is_empty() {
+            // Try current tab
+            match &self.tabs[self.active_tab] {
+                Tab::DirectMessage(id) => Some(id.clone()),
+                _ => None,
+            }
+        } else {
+            self.find_peer_by_name_or_id(args[0])
+        };
+
+        let peer_id = match peer_id {
+            Some(id) => id,
+            None => {
+                if args.is_empty() {
+                    self.status = "Usage: /verify <nickname|peer_id> (or use in a DM tab)".to_string();
+                } else {
+                    self.status = format!("Peer not found: {}", args[0]);
+                }
+                return;
+            }
+        };
+
+        let peer = match self.peers.get(&peer_id) {
+            Some(p) => p,
+            None => {
+                self.status = "Peer not connected".to_string();
+                return;
+            }
+        };
+
+        if peer.public_key.is_empty() {
+            self.status = "No public key available for this peer yet".to_string();
+            return;
+        }
+
+        let safety_number = compute_safety_number(&self.own_public_key, &peer.public_key);
+        let peer_name = self.get_peer_display_name(&peer_id);
+        let verified = if self.verified_peers.contains(&peer_id) { " ✅" } else { "" };
+
+        // Show as a system message in the current tab
+        let tab = self.tabs[self.active_tab].clone();
+        let msg = PlainMessage::system(
+            "system".to_string(),
+            format!(
+                "🔐 Safety Number with {}{}\n  Numbers: {}\n  Emoji:   {}\n\nBoth sides should see the same code.\nIf they match, run /verified {} to mark as verified.",
+                peer_name,
+                verified,
+                safety_number.numeric(),
+                safety_number.emoji(),
+                args.first().copied().unwrap_or(&peer_id[..12.min(peer_id.len())]),
+            ),
+        );
+        self.messages.entry(tab).or_insert_with(Vec::new).push(msg);
+        self.status = format!("Safety number shown for {}", peer_name);
+    }
+
+    /// Handle /verified <nickname|peer_id> — mark a peer as verified
+    fn handle_mark_verified(&mut self, args: &[&str]) {
+        let peer_id = if args.is_empty() {
+            match &self.tabs[self.active_tab] {
+                Tab::DirectMessage(id) => Some(id.clone()),
+                _ => None,
+            }
+        } else {
+            self.find_peer_by_name_or_id(args[0])
+        };
+
+        let peer_id = match peer_id {
+            Some(id) => id,
+            None => {
+                if args.is_empty() {
+                    self.status = "Usage: /verified <nickname|peer_id> (or use in a DM tab)".to_string();
+                } else {
+                    self.status = format!("Peer not found: {}", args[0]);
+                }
+                return;
+            }
+        };
+
+        let peer_name = self.get_peer_display_name(&peer_id);
+        self.verified_peers.insert(peer_id);
+        self.status = format!("✅ {} marked as verified", peer_name);
+
+        // Show confirmation in current tab
+        let tab = self.tabs[self.active_tab].clone();
+        let msg = PlainMessage::system(
+            "system".to_string(),
+            format!("✅ {} is now verified — identity confirmed!", peer_name),
+        );
+        self.messages.entry(tab).or_insert_with(Vec::new).push(msg);
     }
 }

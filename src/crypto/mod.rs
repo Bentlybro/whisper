@@ -1,4 +1,5 @@
 pub mod ratchet;
+pub mod safety_number;
 
 use anyhow::Result;
 use chacha20poly1305::{

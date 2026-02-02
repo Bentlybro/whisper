@@ -287,12 +287,14 @@ impl ChatUI {
 
     pub(crate) fn render_sidebar(&self, f: &mut Frame, area: Rect) {
         let mut peer_items: Vec<ListItem> = self.peers.iter().map(|(id, info)| {
+            let verified_icon = if self.verified_peers.contains(id) { "✅" } else { "❓" };
             let display = if let Some(ref nick) = info.nickname {
-                format!("● {}", nick)
+                format!("{} ● {}", verified_icon, nick)
             } else {
-                format!("● {}", &id[..12.min(id.len())])
+                format!("{} ● {}", verified_icon, &id[..12.min(id.len())])
             };
-            ListItem::new(display).style(Style::default().fg(Color::Green))
+            let color = if self.verified_peers.contains(id) { Color::Green } else { Color::Yellow };
+            ListItem::new(display).style(Style::default().fg(color))
         }).collect();
 
         if peer_items.is_empty() {

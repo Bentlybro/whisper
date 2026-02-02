@@ -15,12 +15,16 @@ use crate::protocol::{Message, PlainMessage};
 #[derive(Clone, Debug)]
 pub struct PeerDisplay {
     pub nickname: Option<String>,
+    /// Peer's identity public key (for safety number computation)
+    pub public_key: Vec<u8>,
 }
 
 /// Full peer state (held by client, not exposed to TUI)
 pub struct PeerInfo {
     pub ratchet: RatchetSession,
     pub nickname: Option<String>,
+    /// Peer's identity public key
+    pub public_key: Vec<u8>,
 }
 
 pub enum OutgoingMessage {
@@ -64,6 +68,10 @@ impl ChatClient {
 
     pub fn identity_id(&self) -> String {
         self.identity.public_key_b64()
+    }
+
+    pub fn identity_public_key_bytes(&self) -> Vec<u8> {
+        self.identity.public_key_bytes()
     }
 
     pub fn nickname(&self) -> Option<&str> {
@@ -233,11 +241,13 @@ impl ChatClient {
                                                 peers_map.insert(from.clone(), PeerInfo {
                                                     ratchet,
                                                     nickname: None,
+                                                    public_key: public_key.clone(),
                                                 });
                                             } else {
                                                 // Re-key: create new ratchet but preserve nickname
                                                 if let Some(peer) = peers_map.get_mut(&from) {
                                                     peer.ratchet = RatchetSession::init(&secret, is_alice);
+                                                    peer.public_key = public_key.clone();
                                                 }
                                             }
                                             
@@ -245,7 +255,7 @@ impl ChatClient {
                                             
                                             // Send peer display update (no crypto state)
                                             let display_map: HashMap<String, PeerDisplay> = peers_map.iter()
-                                                .map(|(k, v)| (k.clone(), PeerDisplay { nickname: v.nickname.clone() }))
+                                                .map(|(k, v)| (k.clone(), PeerDisplay { nickname: v.nickname.clone(), public_key: v.public_key.clone() }))
                                                 .collect();
                                             let _ = peer_update_tx.send(display_map);
                                             
@@ -335,7 +345,7 @@ impl ChatClient {
                                                     let old_nick = peer_info.nickname.clone();
                                                     peer_info.nickname = Some(new_nick.clone());
                                                     let display_map: HashMap<String, PeerDisplay> = peers_map.iter()
-                                                        .map(|(k, v)| (k.clone(), PeerDisplay { nickname: v.nickname.clone() }))
+                                                        .map(|(k, v)| (k.clone(), PeerDisplay { nickname: v.nickname.clone(), public_key: v.public_key.clone() }))
                                                         .collect();
                                                     let _ = peer_update_tx.send(display_map);
                                                     drop(peers_map);
