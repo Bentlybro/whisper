@@ -140,9 +140,6 @@ impl RatchetSession {
         hk.expand(b"wsp-voice-base", &mut voice_base_key)
             .expect("HKDF expand failed");
 
-        eprintln!("[RATCHET] init: is_alice={}, root_key={:?}, chain_send={:?}, chain_recv={:?}, dh_pub={:?}",
-            is_alice, &root_key[..4], &chain_key_send[..4], &chain_key_recv[..4], &public.as_bytes()[..4]);
-        
         Self {
             dh_self_secret: secret.to_bytes(),
             dh_self_public: *public.as_bytes(),
@@ -170,14 +167,9 @@ impl RatchetSession {
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<(RatchetHeader, Vec<u8>, Vec<u8>)> {
         // If we're Alice, have received their DH key, and haven't done the initial
         // send ratchet yet, do it now to start the DH ratchet chain
-        let did_initial = self.is_alice && self.dh_remote.is_some() && !self.initial_ratchet_done;
-        if did_initial {
-            eprintln!("[RATCHET] encrypt: initial ratchet triggered (is_alice={}, send_msg_num={}, root_key={:?})",
-                self.is_alice, self.send_msg_num, &self.root_key[..4]);
+        if self.is_alice && self.dh_remote.is_some() && !self.initial_ratchet_done {
             self.ratchet_send()?;
             self.initial_ratchet_done = true;
-            eprintln!("[RATCHET] encrypt: after initial ratchet (send_msg_num={}, root_key={:?}, dh_self={:?})",
-                self.send_msg_num, &self.root_key[..4], &self.dh_self_public[..4]);
         }
 
         let chain_key = self
@@ -193,10 +185,6 @@ impl RatchetSession {
             prev_chain_len: self.prev_chain_len,
             msg_num: self.send_msg_num,
         };
-        
-        eprintln!("[RATCHET] encrypt: msg_num={}, prev_chain={}, chain_key={:?}, mk={:?}, dh={:?}",
-            self.send_msg_num, self.prev_chain_len, &chain_key[..4], &message_key[..4], &self.dh_self_public[..4]);
-        
         self.send_msg_num += 1;
 
         // Encrypt with message key
@@ -224,24 +212,16 @@ impl RatchetSession {
         // 2. Check if we need a DH ratchet step (new DH key from peer)
         let need_dh_ratchet = match self.dh_remote {
             None => {
-                eprintln!("[RATCHET] decrypt: first msg from peer, storing DH key {:?}", &header.dh_public[..4]);
                 self.dh_remote = Some(header.dh_public);
                 false
             }
-            Some(remote) if remote != header.dh_public => {
-                eprintln!("[RATCHET] decrypt: DH key changed! old={:?} new={:?} → DH ratchet",
-                    &remote[..4], &header.dh_public[..4]);
-                true
-            }
+            Some(remote) if remote != header.dh_public => true,
             _ => false,
         };
 
         if need_dh_ratchet {
-            eprintln!("[RATCHET] decrypt: skip_keys(prev_chain={}), recv_msg_num={}", header.prev_chain_len, self.recv_msg_num);
             self.skip_message_keys(header.prev_chain_len)?;
-            eprintln!("[RATCHET] decrypt: ratchet_recv, root_key before={:?}", &self.root_key[..4]);
             self.ratchet_recv(&header.dh_public)?;
-            eprintln!("[RATCHET] decrypt: ratchet_recv done, root_key after={:?}, recv_msg_num={}", &self.root_key[..4], self.recv_msg_num);
         }
 
         // 3. Skip ahead if msg_num > recv_msg_num (out-of-order within same chain)
@@ -254,9 +234,6 @@ impl RatchetSession {
 
         let (new_chain_key, message_key) = kdf_chain(&chain_key);
         self.chain_key_recv = Some(new_chain_key);
-        
-        eprintln!("[RATCHET] decrypt: msg_num={}, recv_msg_num={}, chain_key={:?}, mk={:?}, dh_header={:?}, need_ratchet={}",
-            header.msg_num, self.recv_msg_num, &chain_key[..4], &message_key[..4], &header.dh_public[..4], need_dh_ratchet);
         self.recv_msg_num += 1;
 
         decrypt_with_key(&message_key, nonce, ciphertext)
