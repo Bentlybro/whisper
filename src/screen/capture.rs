@@ -15,10 +15,12 @@ use tokio::sync::mpsc;
 
 use super::{ScreenFrameData, JPEG_QUALITY, MAX_CAPTURE_WIDTH, TARGET_FPS};
 
-/// Screen capture pipeline — runs in a dedicated thread
+/// Screen capture pipeline — runs in a dedicated thread.
+/// Uses a bounded channel (capacity 2) to apply backpressure.
+/// If the consumer can't keep up, old frames are dropped.
 pub struct ScreenCapture {
     running: Arc<AtomicBool>,
-    frame_rx: Option<mpsc::UnboundedReceiver<ScreenFrameData>>,
+    frame_rx: Option<mpsc::Receiver<ScreenFrameData>>,
 }
 
 impl ScreenCapture {
@@ -32,7 +34,8 @@ impl ScreenCapture {
         drop(display); // Drop here — Capturer is not Send on X11
 
         let running = Arc::new(AtomicBool::new(true));
-        let (frame_tx, frame_rx) = mpsc::unbounded_channel::<ScreenFrameData>();
+        // Bounded channel (cap 2): if consumer is slow, old frames are dropped
+        let (frame_tx, frame_rx) = mpsc::channel::<ScreenFrameData>(2);
 
         let running_clone = running.clone();
         std::thread::spawn(move || {
@@ -63,7 +66,7 @@ impl ScreenCapture {
     }
 
     /// Take the frame receiver (can only be called once)
-    pub fn take_frame_rx(&mut self) -> Option<mpsc::UnboundedReceiver<ScreenFrameData>> {
+    pub fn take_frame_rx(&mut self) -> Option<mpsc::Receiver<ScreenFrameData>> {
         self.frame_rx.take()
     }
 
@@ -83,7 +86,7 @@ fn capture_loop(
     mut capturer: Capturer,
     src_w: usize,
     src_h: usize,
-    tx: mpsc::UnboundedSender<ScreenFrameData>,
+    tx: mpsc::Sender<ScreenFrameData>,
     running: Arc<AtomicBool>,
 ) {
     let frame_interval = Duration::from_millis(1000 / TARGET_FPS as u64);
@@ -121,8 +124,15 @@ fn capture_loop(
                         };
                         seq += 1;
 
-                        if tx.send(frame_data).is_err() {
-                            break; // Receiver dropped
+                        // try_send: if channel is full, drop this frame (backpressure)
+                        match tx.try_send(frame_data) {
+                            Ok(_) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                // Consumer can't keep up — skip this frame
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                break; // Receiver dropped
+                            }
                         }
                     }
                     Err(_) => {} // Skip frame on encode error

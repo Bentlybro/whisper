@@ -62,7 +62,7 @@ pub struct ChatUI {
     pub(crate) autocomplete: Option<AutocompleteState>,
     // Screen sharing state
     pub(crate) screen_capture: Option<crate::screen::capture::ScreenCapture>,
-    pub(crate) screen_capture_rx: Option<mpsc::UnboundedReceiver<crate::screen::ScreenFrameData>>,
+    pub(crate) screen_capture_rx: Option<mpsc::Receiver<crate::screen::ScreenFrameData>>,
     pub(crate) screen_share_target: Option<String>, // peer_id we're sharing to
     pub(crate) screen_viewer_from: Option<String>, // peer_id sharing with us
     pub(crate) pending_screen_share_from: Option<String>, // incoming screen share request
@@ -74,6 +74,8 @@ pub struct ChatUI {
     pub(crate) image_picker: ratatui_image::picker::Picker,
     /// Whether we're in screen share view mode (full-screen frame display)
     pub(crate) screen_view_active: bool,
+    /// Last time we sent a screen frame (for pacing)
+    pub(crate) last_screen_send: std::time::Instant,
 }
 
 impl ChatUI {
@@ -116,6 +118,7 @@ impl ChatUI {
             screen_protocol: None,
             image_picker,
             screen_view_active: false,
+            last_screen_send: std::time::Instant::now(),
         }
     }
 
@@ -631,15 +634,19 @@ impl ChatUI {
                 }
             }
 
-            // Handle incoming screen frames — decode and store for TUI rendering
-            while let Ok((from, frame_data)) = screen_in_rx.try_recv() {
-                // Only accept frames from the peer we're viewing
-                let accept = self.screen_viewer_from.as_ref() == Some(&from);
-                if accept {
+            // Handle incoming screen frames — drain all, keep ONLY latest (drop stale)
+            {
+                let mut latest_frame: Option<(String, Vec<u8>)> = None;
+                while let Ok(item) = screen_in_rx.try_recv() {
+                    // Only keep frames from the peer we're viewing
+                    if self.screen_viewer_from.as_ref() == Some(&item.0) {
+                        latest_frame = Some(item);
+                    }
+                }
+                if let Some((_from, frame_data)) = latest_frame {
                     if let Ok(frame) = rmp_serde::from_slice::<crate::screen::ScreenFrameData>(&frame_data) {
                         if let Ok(decoded) = crate::screen::viewer::DecodedFrame::from_frame(&frame) {
                             let is_first_frame = self.screen_frame.is_none();
-                            // Create ratatui-image protocol for rendering
                             let protocol = decoded.to_protocol(&mut self.image_picker);
                             self.screen_protocol = Some(protocol);
                             self.screen_frame = Some(decoded);
@@ -670,12 +677,17 @@ impl ChatUI {
                                 self.screen_view_active = true;
                             }
                         }
-                        // Send to peer
-                        if let Ok(serialized) = rmp_serde::to_vec(&frame) {
-                            let _ = msg_tx.send(OutgoingMessage::ScreenFrame {
-                                target_id: target_id.clone(),
-                                data: serialized,
-                            });
+                        // Only send to peer if enough time has passed (pacing)
+                        // This prevents flooding the outgoing channel and blocking audio
+                        let min_send_interval = std::time::Duration::from_millis(125); // ~8 fps max send rate
+                        if self.last_screen_send.elapsed() >= min_send_interval {
+                            if let Ok(serialized) = rmp_serde::to_vec(&frame) {
+                                let _ = msg_tx.send(OutgoingMessage::ScreenFrame {
+                                    target_id: target_id.clone(),
+                                    data: serialized,
+                                });
+                                self.last_screen_send = std::time::Instant::now();
+                            }
                         }
                     }
                 }
