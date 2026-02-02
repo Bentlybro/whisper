@@ -244,11 +244,10 @@ impl ChatClient {
                                                     public_key: public_key.clone(),
                                                 });
                                             } else {
-                                                // Re-key: create new ratchet but preserve nickname
-                                                if let Some(peer) = peers_map.get_mut(&from) {
-                                                    peer.ratchet = RatchetSession::init(&secret, is_alice);
-                                                    peer.public_key = public_key.clone();
-                                                }
+                                                // Already have a ratchet for this peer — ignore duplicate KE
+                                                // Re-creating would reset the ratchet state and desync
+                                                // (both sides send initial KE + reply KE = 2 each, causing double init)
+                                                continue;
                                             }
                                             
                                             let _ = status_tx_recv.send(format!("🔐 Double Ratchet session established with {}", &from[..12]));
