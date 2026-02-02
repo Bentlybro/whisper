@@ -326,13 +326,23 @@ impl ChatClient {
                                     if let Some(peer_info) = peers_map.get_mut(&from) {
                                         // Decrypt using Double Ratchet if header present, else fallback to static key
                                         let plaintext = if !header.is_empty() {
-                                            if let Ok(ratchet_header) = bincode::deserialize::<RatchetHeader>(&header) {
-                                                peer_info.ratchet.decrypt(&ratchet_header, &nonce, &ciphertext).ok()
-                                            } else {
-                                                None
+                                            match bincode::deserialize::<RatchetHeader>(&header) {
+                                                Ok(ratchet_header) => {
+                                                    match peer_info.ratchet.decrypt(&ratchet_header, &nonce, &ciphertext) {
+                                                        Ok(pt) => Some(pt),
+                                                        Err(e) => {
+                                                            let _ = status_tx_recv.send(format!("⚠️ Ratchet decrypt failed from {}: {}", &from[..12], e));
+                                                            None
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    let _ = status_tx_recv.send(format!("⚠️ Header deserialize failed from {}: {}", &from[..12], e));
+                                                    None
+                                                }
                                             }
                                         } else {
-                                            // Legacy: no header means pre-ratchet message (shouldn't happen in new code)
+                                            let _ = status_tx_recv.send(format!("⚠️ Empty header from {} (legacy?)", &from[..12]));
                                             None
                                         };
                                         
