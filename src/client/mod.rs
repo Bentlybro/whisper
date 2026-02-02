@@ -8,11 +8,18 @@ use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage, MaybeTlsStream, WebSocketStream};
 
 use crate::crypto::{decrypt_message, encrypt_message, Identity};
+use crate::crypto::ratchet::{RatchetHeader, RatchetSession};
 use crate::protocol::{Message, PlainMessage};
 
+/// Display-only peer info sent to the TUI (no crypto state)
 #[derive(Clone, Debug)]
+pub struct PeerDisplay {
+    pub nickname: Option<String>,
+}
+
+/// Full peer state (held by client, not exposed to TUI)
 pub struct PeerInfo {
-    pub shared_secret: Vec<u8>,
+    pub ratchet: RatchetSession,
     pub nickname: Option<String>,
 }
 
@@ -71,14 +78,14 @@ impl ChatClient {
         mpsc::UnboundedSender<OutgoingMessage>,
         mpsc::UnboundedReceiver<PlainMessage>,
         mpsc::UnboundedReceiver<String>, // Status messages
-        mpsc::UnboundedReceiver<HashMap<String, PeerInfo>>, // Peer updates
+        mpsc::UnboundedReceiver<HashMap<String, PeerDisplay>>, // Peer updates
         mpsc::UnboundedReceiver<(String, Vec<u8>)>, // Incoming audio frames (peer_id, decrypted_opus_data)
     )> {
         // Channels for communication with TUI (persist across reconnects)
         let (msg_tx, msg_rx) = mpsc::unbounded_channel::<OutgoingMessage>();
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel::<PlainMessage>();
         let (status_tx, status_rx) = mpsc::unbounded_channel::<String>();
-        let (peer_update_tx, peer_update_rx) = mpsc::unbounded_channel::<HashMap<String, PeerInfo>>();
+        let (peer_update_tx, peer_update_rx) = mpsc::unbounded_channel::<HashMap<String, PeerDisplay>>();
         let (audio_in_tx, audio_in_rx) = mpsc::unbounded_channel::<(String, Vec<u8>)>();
 
         let identity = self.identity.clone_for_thread();
@@ -150,7 +157,7 @@ impl ChatClient {
         outgoing_rx: std::sync::Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<OutgoingMessage>>>,
         incoming_tx: mpsc::UnboundedSender<PlainMessage>,
         status_tx: mpsc::UnboundedSender<String>,
-        peer_update_tx: mpsc::UnboundedSender<HashMap<String, PeerInfo>>,
+        peer_update_tx: mpsc::UnboundedSender<HashMap<String, PeerDisplay>>,
         audio_in_tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
         attempt: u32,
     ) -> Result<()> {
@@ -218,22 +225,29 @@ impl ChatClient {
                                             let mut peers_map = peers_recv.write().await;
                                             let is_new_peer = !peers_map.contains_key(&from);
                                             
+                                            // Determine role: lower session_id = Alice (initiates DH ratchet)
+                                            let is_alice = session_id_recv < from;
+                                            
                                             if is_new_peer {
+                                                let ratchet = RatchetSession::init(&secret, is_alice);
                                                 peers_map.insert(from.clone(), PeerInfo {
-                                                    shared_secret: secret.clone(),
+                                                    ratchet,
                                                     nickname: None,
                                                 });
                                             } else {
-                                                // Update shared secret but preserve nickname
+                                                // Re-key: create new ratchet but preserve nickname
                                                 if let Some(peer) = peers_map.get_mut(&from) {
-                                                    peer.shared_secret = secret.clone();
+                                                    peer.ratchet = RatchetSession::init(&secret, is_alice);
                                                 }
                                             }
                                             
-                                            let _ = status_tx_recv.send(format!("🔐 Encrypted session established with {}", &from[..12]));
+                                            let _ = status_tx_recv.send(format!("🔐 Double Ratchet session established with {}", &from[..12]));
                                             
-                                            // Send peer update
-                                            let _ = peer_update_tx.send(peers_map.clone());
+                                            // Send peer display update (no crypto state)
+                                            let display_map: HashMap<String, PeerDisplay> = peers_map.iter()
+                                                .map(|(k, v)| (k.clone(), PeerDisplay { nickname: v.nickname.clone() }))
+                                                .collect();
+                                            let _ = peer_update_tx.send(display_map);
                                             
                                             // Show join notification
                                             if is_new_peer {
@@ -254,13 +268,13 @@ impl ChatClient {
                                                     let _ = ke_reply_tx.send(reply_data);
                                                 }
                                                 
-                                                // Send our nickname after key exchange
+                                                // Send our nickname after key exchange (using ratchet)
                                                 if let Some(ref nick) = my_nickname_recv {
                                                     let nick = nick.clone();
                                                     let session_id_nick = session_id_recv.clone();
-                                                    let secret_nick = secret.clone();
                                                     let nickname_tx_clone = nickname_tx.clone();
                                                     let from_clone = from.clone();
+                                                    let peers_nick = peers_recv.clone();
                                                     tokio::spawn(async move {
                                                         tokio::time::sleep(Duration::from_millis(500)).await;
                                                         let nickname_msg = PlainMessage::nickname(
@@ -268,14 +282,19 @@ impl ChatClient {
                                                             nick,
                                                         );
                                                         if let Ok(serialized) = rmp_serde::to_vec(&nickname_msg) {
-                                                            if let Ok((nonce, ciphertext)) = encrypt_message(&secret_nick, &serialized) {
-                                                                let encrypted_msg = Message::Encrypted {
-                                                                    from: session_id_nick,
-                                                                    nonce,
-                                                                    ciphertext,
-                                                                };
-                                                                if let Ok(data) = bincode::serialize(&encrypted_msg) {
-                                                                    let _ = nickname_tx_clone.send((from_clone, data));
+                                                            let mut peers_map = peers_nick.write().await;
+                                                            if let Some(peer) = peers_map.get_mut(&from_clone) {
+                                                                if let Ok((header, nonce, ciphertext)) = peer.ratchet.encrypt(&serialized) {
+                                                                    let header_bytes = bincode::serialize(&header).unwrap_or_default();
+                                                                    let encrypted_msg = Message::Encrypted {
+                                                                        from: session_id_nick,
+                                                                        header: header_bytes,
+                                                                        nonce,
+                                                                        ciphertext,
+                                                                    };
+                                                                    if let Ok(data) = bincode::serialize(&encrypted_msg) {
+                                                                        let _ = nickname_tx_clone.send((from_clone, data));
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -288,64 +307,76 @@ impl ChatClient {
                                         }
                                     }
                                 }
-                                Message::Encrypted { from, nonce, ciphertext } => {
+                                Message::Encrypted { from, header, nonce, ciphertext } => {
                                     if from == session_id_recv {
                                         continue; // Ignore our own messages
                                     }
                                     
-                                    let peers_map = peers_recv.read().await;
-                                    if let Some(peer_info) = peers_map.get(&from) {
-                                        match decrypt_message(&peer_info.shared_secret, &nonce, &ciphertext) {
-                                            Ok(plaintext) => {
-                                                if let Ok(plain_msg) = rmp_serde::from_slice::<PlainMessage>(&plaintext)
-                                                    .or_else(|_| bincode::deserialize::<PlainMessage>(&plaintext)) {
-                                                    // Handle nickname updates
-                                                    if plain_msg.system && plain_msg.nickname.is_some() {
-                                                        let new_nick = plain_msg.nickname.clone().unwrap();
-                                                        drop(peers_map);
-                                                        let mut peers_map = peers_recv.write().await;
-                                                        let old_nick = peers_map.get(&from).and_then(|p| p.nickname.clone());
-                                                        if let Some(peer) = peers_map.get_mut(&from) {
-                                                            peer.nickname = Some(new_nick.clone());
-                                                            let _ = peer_update_tx.send(peers_map.clone());
-                                                        }
-                                                        drop(peers_map);
-                                                        let display = old_nick.unwrap_or_else(|| from[..12.min(from.len())].to_string());
-                                                        let notify = PlainMessage::system(
-                                                            from.clone(),
-                                                            format!("{} is now known as {}", display, new_nick),
-                                                        );
-                                                        let _ = incoming_tx.send(notify);
-                                                    } else {
-                                                        let _ = incoming_tx.send(plain_msg);
-                                                    }
-                                                }
+                                    let mut peers_map = peers_recv.write().await;
+                                    if let Some(peer_info) = peers_map.get_mut(&from) {
+                                        // Decrypt using Double Ratchet if header present, else fallback to static key
+                                        let plaintext = if !header.is_empty() {
+                                            if let Ok(ratchet_header) = bincode::deserialize::<RatchetHeader>(&header) {
+                                                peer_info.ratchet.decrypt(&ratchet_header, &nonce, &ciphertext).ok()
+                                            } else {
+                                                None
                                             }
-                                            Err(_) => {
-                                                // Silently drop failed decryptions
+                                        } else {
+                                            // Legacy: no header means pre-ratchet message (shouldn't happen in new code)
+                                            None
+                                        };
+                                        
+                                        if let Some(plaintext) = plaintext {
+                                            if let Ok(plain_msg) = rmp_serde::from_slice::<PlainMessage>(&plaintext)
+                                                .or_else(|_| bincode::deserialize::<PlainMessage>(&plaintext)) {
+                                                // Handle nickname updates
+                                                if plain_msg.system && plain_msg.nickname.is_some() {
+                                                    let new_nick = plain_msg.nickname.clone().unwrap();
+                                                    let old_nick = peer_info.nickname.clone();
+                                                    peer_info.nickname = Some(new_nick.clone());
+                                                    let display_map: HashMap<String, PeerDisplay> = peers_map.iter()
+                                                        .map(|(k, v)| (k.clone(), PeerDisplay { nickname: v.nickname.clone() }))
+                                                        .collect();
+                                                    let _ = peer_update_tx.send(display_map);
+                                                    drop(peers_map);
+                                                    let display = old_nick.unwrap_or_else(|| from[..12.min(from.len())].to_string());
+                                                    let notify = PlainMessage::system(
+                                                        from.clone(),
+                                                        format!("{} is now known as {}", display, new_nick),
+                                                    );
+                                                    let _ = incoming_tx.send(notify);
+                                                } else {
+                                                    drop(peers_map);
+                                                    let _ = incoming_tx.send(plain_msg);
+                                                }
                                             }
                                         }
                                     }
                                 }
-                                Message::GroupEncrypted { from, group_id, nonce, ciphertext } => {
+                                Message::GroupEncrypted { from, group_id, header, nonce, ciphertext } => {
                                     if from == session_id_recv {
                                         continue; // Ignore our own messages
                                     }
                                     
-                                    // Try to decrypt with sender's pairwise key
-                                    let peers_map = peers_recv.read().await;
-                                    if let Some(peer_info) = peers_map.get(&from) {
-                                        match decrypt_message(&peer_info.shared_secret, &nonce, &ciphertext) {
-                                            Ok(plaintext) => {
-                                                if let Ok(mut plain_msg) = rmp_serde::from_slice::<PlainMessage>(&plaintext)
-                                                    .or_else(|_| bincode::deserialize::<PlainMessage>(&plaintext)) {
-                                                    // Ensure group_id is set (in case it wasn't in the inner message)
-                                                    plain_msg.group_id = Some(group_id);
-                                                    let _ = incoming_tx.send(plain_msg);
-                                                }
+                                    // Try to decrypt with sender's pairwise ratchet
+                                    let mut peers_map = peers_recv.write().await;
+                                    if let Some(peer_info) = peers_map.get_mut(&from) {
+                                        let plaintext = if !header.is_empty() {
+                                            if let Ok(ratchet_header) = bincode::deserialize::<RatchetHeader>(&header) {
+                                                peer_info.ratchet.decrypt(&ratchet_header, &nonce, &ciphertext).ok()
+                                            } else {
+                                                None
                                             }
-                                            Err(_) => {
-                                                // This message was encrypted for a different group member — ignore
+                                        } else {
+                                            None
+                                        };
+                                        
+                                        if let Some(plaintext) = plaintext {
+                                            if let Ok(mut plain_msg) = rmp_serde::from_slice::<PlainMessage>(&plaintext)
+                                                .or_else(|_| bincode::deserialize::<PlainMessage>(&plaintext)) {
+                                                plain_msg.group_id = Some(group_id);
+                                                drop(peers_map);
+                                                let _ = incoming_tx.send(plain_msg);
                                             }
                                         }
                                     }
@@ -354,10 +385,11 @@ impl ChatClient {
                                     if from == session_id_recv {
                                         continue;
                                     }
-                                    // Decrypt audio frame with pairwise key — low latency path
-                                    let peers_map = peers_recv.read().await;
-                                    if let Some(peer_info) = peers_map.get(&from) {
-                                        if let Ok(opus_data) = decrypt_message(&peer_info.shared_secret, &nonce, &ciphertext) {
+                                    // Decrypt audio frame with cached voice key — low latency path
+                                    let mut peers_map = peers_recv.write().await;
+                                    if let Some(peer_info) = peers_map.get_mut(&from) {
+                                        let voice_key = peer_info.ratchet.derive_voice_key();
+                                        if let Ok(opus_data) = decrypt_message(&voice_key, &nonce, &ciphertext) {
                                             let _ = audio_in_tx.send((from, opus_data));
                                         }
                                     }
@@ -433,17 +465,20 @@ impl ChatClient {
                         if let Some(outgoing) = outgoing {
                             match outgoing {
                                 OutgoingMessage::Direct { target_id, message } => {
-                                    let peers_map = peers_send.read().await;
-                                    if let Some(peer_info) = peers_map.get(&target_id) {
+                                    let mut peers_map = peers_send.write().await;
+                                    if let Some(peer_info) = peers_map.get_mut(&target_id) {
                                         let serialized = rmp_serde::to_vec(&message).unwrap();
-                                        match encrypt_message(&peer_info.shared_secret, &serialized) {
-                                            Ok((nonce, ciphertext)) => {
+                                        match peer_info.ratchet.encrypt(&serialized) {
+                                            Ok((header, nonce, ciphertext)) => {
+                                                let header_bytes = bincode::serialize(&header).unwrap_or_default();
                                                 let encrypted_msg = Message::Encrypted {
                                                     from: session_id_send.clone(),
+                                                    header: header_bytes,
                                                     nonce,
                                                     ciphertext,
                                                 };
                                                 let data = bincode::serialize(&encrypted_msg).unwrap();
+                                                drop(peers_map);
                                                 if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
                                                     let _ = failure_tx_send.send("Send failed".to_string());
                                                     break;
@@ -458,45 +493,53 @@ impl ChatClient {
                                     }
                                 }
                                 OutgoingMessage::Global(message) => {
-                                    let peers_map = peers_send.read().await;
+                                    let mut peers_map = peers_send.write().await;
                                     if peers_map.is_empty() {
                                         let _ = status_tx_send.send("⚠️  No peers connected".to_string());
                                     } else {
-                                        for (peer_id, peer_info) in peers_map.iter() {
+                                        // Collect peer IDs first to avoid borrow issues
+                                        let peer_ids: Vec<String> = peers_map.keys().cloned().collect();
+                                        for peer_id in &peer_ids {
                                             let serialized = rmp_serde::to_vec(&message).unwrap();
-                                            match encrypt_message(&peer_info.shared_secret, &serialized) {
-                                                Ok((nonce, ciphertext)) => {
-                                                    let encrypted_msg = Message::Encrypted {
-                                                        from: session_id_send.clone(),
-                                                        nonce,
-                                                        ciphertext,
-                                                    };
-                                                    let data = bincode::serialize(&encrypted_msg).unwrap();
-                                                    if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
-                                                        let _ = failure_tx_send.send("Send failed".to_string());
-                                                        break;
+                                            if let Some(peer_info) = peers_map.get_mut(peer_id) {
+                                                match peer_info.ratchet.encrypt(&serialized) {
+                                                    Ok((header, nonce, ciphertext)) => {
+                                                        let header_bytes = bincode::serialize(&header).unwrap_or_default();
+                                                        let encrypted_msg = Message::Encrypted {
+                                                            from: session_id_send.clone(),
+                                                            header: header_bytes,
+                                                            nonce,
+                                                            ciphertext,
+                                                        };
+                                                        let data = bincode::serialize(&encrypted_msg).unwrap();
+                                                        if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
+                                                            let _ = failure_tx_send.send("Send failed".to_string());
+                                                            break;
+                                                        }
                                                     }
-                                                }
-                                                Err(e) => {
-                                                    let _ = status_tx_send.send(format!("❌ Encryption failed for {}: {}", &peer_id[..12], e));
+                                                    Err(e) => {
+                                                        let _ = status_tx_send.send(format!("❌ Encryption failed for {}: {}", &peer_id[..12], e));
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
                                 OutgoingMessage::Group { group_id, member_ids, message } => {
-                                    // Fan-out: encrypt once per member using pairwise keys,
+                                    // Fan-out: encrypt once per member using pairwise ratchets,
                                     // send as GroupEncrypted so relay routes via room
-                                    let peers_map = peers_send.read().await;
+                                    let mut peers_map = peers_send.write().await;
                                     let mut sent = 0;
                                     for member_id in &member_ids {
-                                        if let Some(peer_info) = peers_map.get(member_id) {
+                                        if let Some(peer_info) = peers_map.get_mut(member_id) {
                                             let serialized = rmp_serde::to_vec(&message).unwrap();
-                                            match encrypt_message(&peer_info.shared_secret, &serialized) {
-                                                Ok((nonce, ciphertext)) => {
+                                            match peer_info.ratchet.encrypt(&serialized) {
+                                                Ok((header, nonce, ciphertext)) => {
+                                                    let header_bytes = bincode::serialize(&header).unwrap_or_default();
                                                     let encrypted_msg = Message::GroupEncrypted {
                                                         from: session_id_send.clone(),
                                                         group_id: group_id.clone(),
+                                                        header: header_bytes,
                                                         nonce,
                                                         ciphertext,
                                                     };
@@ -540,16 +583,18 @@ impl ChatClient {
                                     }
                                 }
                                 OutgoingMessage::Audio { target_id, data: audio_data } => {
-                                    // Encrypt audio frame and send — fast path
-                                    let peers_map = peers_send.read().await;
-                                    if let Some(peer_info) = peers_map.get(&target_id) {
-                                        if let Ok((nonce, ciphertext)) = encrypt_message(&peer_info.shared_secret, &audio_data) {
+                                    // Encrypt audio frame with cached voice key — fast path
+                                    let mut peers_map = peers_send.write().await;
+                                    if let Some(peer_info) = peers_map.get_mut(&target_id) {
+                                        let voice_key = peer_info.ratchet.derive_voice_key();
+                                        if let Ok((nonce, ciphertext)) = encrypt_message(&voice_key, &audio_data) {
                                             let audio_msg = Message::AudioFrame {
                                                 from: session_id_send.clone(),
                                                 nonce,
                                                 ciphertext,
                                             };
                                             if let Ok(data) = bincode::serialize(&audio_msg) {
+                                                drop(peers_map);
                                                 if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
                                                     let _ = failure_tx_send.send("Send failed".to_string());
                                                     break;

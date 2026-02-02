@@ -12,6 +12,9 @@ pub enum Message {
     /// Encrypted message payload
     Encrypted {
         from: String,
+        /// Serialized RatchetHeader (DH public key + chain metadata)
+        #[serde(default)]
+        header: Vec<u8>,
         nonce: Vec<u8>,
         ciphertext: Vec<u8>,
     },
@@ -33,6 +36,9 @@ pub enum Message {
     GroupEncrypted {
         from: String,
         group_id: String,
+        /// Serialized RatchetHeader (DH public key + chain metadata)
+        #[serde(default)]
+        header: Vec<u8>,
         nonce: Vec<u8>,
         ciphertext: Vec<u8>,
     },

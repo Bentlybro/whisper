@@ -18,7 +18,7 @@ use std::io;
 use tokio::sync::mpsc;
 
 use crate::audio::AudioPipeline;
-use crate::client::{OutgoingMessage, PeerInfo};
+use crate::client::{OutgoingMessage, PeerDisplay};
 use crate::protocol::PlainMessage;
 
 use types::{
@@ -32,7 +32,7 @@ pub struct ChatUI {
     pub(crate) input: Vec<char>,
     pub(crate) cursor: usize,
     pub(crate) status: String,
-    pub(crate) peers: HashMap<String, PeerInfo>,
+    pub(crate) peers: HashMap<String, PeerDisplay>,
     pub(crate) own_id: String,
     pub(crate) own_nickname: Option<String>,
     pub(crate) pending_offers: HashMap<String, PendingFileOffer>,
@@ -79,7 +79,7 @@ impl ChatUI {
         mut msg_tx: mpsc::UnboundedSender<OutgoingMessage>,
         mut incoming_rx: mpsc::UnboundedReceiver<PlainMessage>,
         mut status_rx: mpsc::UnboundedReceiver<String>,
-        mut peer_update_rx: mpsc::UnboundedReceiver<HashMap<String, PeerInfo>>,
+        mut peer_update_rx: mpsc::UnboundedReceiver<HashMap<String, PeerDisplay>>,
         mut audio_in_rx: mpsc::UnboundedReceiver<(String, Vec<u8>)>,
     ) -> Result<()> {
         // Setup terminal - no mouse capture so native text selection works
@@ -108,7 +108,7 @@ impl ChatUI {
         msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>,
         incoming_rx: &mut mpsc::UnboundedReceiver<PlainMessage>,
         status_rx: &mut mpsc::UnboundedReceiver<String>,
-        peer_update_rx: &mut mpsc::UnboundedReceiver<HashMap<String, PeerInfo>>,
+        peer_update_rx: &mut mpsc::UnboundedReceiver<HashMap<String, PeerDisplay>>,
         audio_in_rx: &mut mpsc::UnboundedReceiver<(String, Vec<u8>)>,
     ) -> Result<()> {
         let mut opus_decoder: Option<audiopus::coder::Decoder> = None;

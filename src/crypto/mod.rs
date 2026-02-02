@@ -1,3 +1,5 @@
+pub mod ratchet;
+
 use anyhow::Result;
 use chacha20poly1305::{
     aead::{Aead, KeyInit, OsRng},
