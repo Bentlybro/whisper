@@ -73,7 +73,11 @@ pub struct RatchetSession {
     // Whether the initial send ratchet has been performed
     initial_ratchet_done: bool,
 
-    // Cached voice key (derived once per call, stable during call)
+    // Stable voice base key — derived at init from shared secret, never changes
+    // (root_key changes with every ratchet step, so can't use it for voice)
+    voice_base_key: [u8; 32],
+
+    // Cached voice key (derived from voice_base_key, stable during call)
     voice_key: Option<[u8; 32]>,
 }
 
@@ -90,6 +94,7 @@ impl Drop for RatchetSession {
         for (_, key) in self.skipped_keys.iter_mut() {
             key.zeroize();
         }
+        self.voice_base_key.zeroize();
         if let Some(ref mut vk) = self.voice_key {
             vk.zeroize();
         }
@@ -129,6 +134,12 @@ impl RatchetSession {
             (chain_b, chain_a)
         };
 
+        // Derive a stable voice base key from the shared secret — this never changes
+        // with ratchet advancement, so both sides always agree on it
+        let mut voice_base_key = [0u8; 32];
+        hk.expand(b"wsp-voice-base", &mut voice_base_key)
+            .expect("HKDF expand failed");
+
         Self {
             dh_self_secret: secret.to_bytes(),
             dh_self_public: *public.as_bytes(),
@@ -142,6 +153,7 @@ impl RatchetSession {
             skipped_keys: std::collections::HashMap::new(),
             is_alice,
             initial_ratchet_done: false,
+            voice_base_key,
             voice_key: None,
         }
     }
@@ -233,12 +245,14 @@ impl RatchetSession {
     }
 
     /// Derive (or return cached) voice key for audio encryption.
-    /// Uses the current root key — stable within a call even as text ratchets advance.
+    /// Uses the stable voice_base_key (derived at init from shared secret),
+    /// NOT the root key (which changes with every DH ratchet step).
+    /// Both sides always derive the same voice key regardless of ratchet state.
     pub fn derive_voice_key(&mut self) -> [u8; 32] {
         if let Some(vk) = self.voice_key {
             return vk;
         }
-        let hk = Hkdf::<Sha256>::new(None, &self.root_key);
+        let hk = Hkdf::<Sha256>::new(None, &self.voice_base_key);
         let mut vk = [0u8; 32];
         hk.expand(KDF_VOICE_INFO, &mut vk)
             .expect("HKDF expand failed");
