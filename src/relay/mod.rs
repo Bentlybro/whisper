@@ -116,12 +116,29 @@ async fn handle_connection(stream: TcpStream, peers: PeerMap, rooms: RoomMap) ->
                             target_tx.send(data)?;
                         }
                     }
-                    Message::KeyExchange { .. } | Message::Encrypted { .. } | Message::AudioFrame { .. } => {
-                        // Forward encrypted messages/audio to all peers (blind forwarding)
+                    Message::KeyExchange { .. } | Message::AudioFrame { .. } => {
+                        // Forward key exchanges and audio to all peers (blind forwarding)
                         let peers_read = peers.read().await;
                         for (sid, peer_tx) in peers_read.iter() {
                             if Some(sid) != session_id.as_ref() {
                                 let _ = peer_tx.send(data.clone());
+                            }
+                        }
+                    }
+                    Message::Encrypted { ref target, .. } => {
+                        if !target.is_empty() {
+                            // Targeted: forward only to the specified peer
+                            let peers_read = peers.read().await;
+                            if let Some(peer_tx) = peers_read.get(target) {
+                                let _ = peer_tx.send(data.clone());
+                            }
+                        } else {
+                            // Broadcast (legacy): forward to all peers
+                            let peers_read = peers.read().await;
+                            for (sid, peer_tx) in peers_read.iter() {
+                                if Some(sid) != session_id.as_ref() {
+                                    let _ = peer_tx.send(data.clone());
+                                }
                             }
                         }
                     }

@@ -298,6 +298,7 @@ impl ChatClient {
                                                                     let header_bytes = bincode::serialize(&header).unwrap_or_default();
                                                                     let encrypted_msg = Message::Encrypted {
                                                                         from: session_id_nick,
+                                                                        target: from_clone.clone(),
                                                                         header: header_bytes,
                                                                         nonce,
                                                                         ciphertext,
@@ -317,7 +318,7 @@ impl ChatClient {
                                         }
                                     }
                                 }
-                                Message::Encrypted { from, header, nonce, ciphertext } => {
+                                Message::Encrypted { from, target: _, header, nonce, ciphertext } => {
                                     if from == session_id_recv {
                                         continue; // Ignore our own messages
                                     }
@@ -493,6 +494,7 @@ impl ChatClient {
                                                 let header_bytes = bincode::serialize(&header).unwrap_or_default();
                                                 let encrypted_msg = Message::Encrypted {
                                                     from: session_id_send.clone(),
+                                                    target: target_id.clone(),
                                                     header: header_bytes,
                                                     nonce,
                                                     ciphertext,
@@ -527,6 +529,7 @@ impl ChatClient {
                                                         let header_bytes = bincode::serialize(&header).unwrap_or_default();
                                                         let encrypted_msg = Message::Encrypted {
                                                             from: session_id_send.clone(),
+                                                            target: peer_id.clone(),
                                                             header: header_bytes,
                                                             nonce,
                                                             ciphertext,

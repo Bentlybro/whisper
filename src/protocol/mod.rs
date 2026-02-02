@@ -12,6 +12,10 @@ pub enum Message {
     /// Encrypted message payload
     Encrypted {
         from: String,
+        /// Target session ID — relay forwards only to this peer
+        /// Empty string = broadcast to all (legacy/KeyExchange compat)
+        #[serde(default)]
+        target: String,
         /// Serialized RatchetHeader (DH public key + chain metadata)
         #[serde(default)]
         header: Vec<u8>,
