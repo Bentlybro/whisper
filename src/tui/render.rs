@@ -284,39 +284,18 @@ impl ChatUI {
 
         // Render the frame using ratatui-image (Sixel/Kitty/iTerm2/halfblocks)
         if self.screen_protocol.is_some() {
-            // Frame block with title
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(
-                    format!(" 🖥️  {} ", role),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                ))
-                .border_style(Style::default().fg(Color::DarkGray));
-
-            let inner = block.inner(frame_area);
-            f.render_widget(block, frame_area);
-
-            // Render with the detected terminal graphics protocol
+            // Render image DIRECTLY in the frame area — no block/border
+            // (borders cause ratatui to clear the area, which flickers with Sixel/Kitty)
             let image_widget = StatefulImage::default();
             if let Some(ref mut protocol) = self.screen_protocol {
-                f.render_stateful_widget(image_widget, inner, protocol);
+                f.render_stateful_widget(image_widget, frame_area, protocol);
             }
         } else {
-            // No frame yet — show waiting message
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(
-                    format!(" 🖥️  {} ", role),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                ))
-                .border_style(Style::default().fg(Color::DarkGray));
-
-            let inner = block.inner(frame_area);
-            f.render_widget(block, frame_area);
-
-            let waiting = Paragraph::new("Waiting for frames...")
-                .style(Style::default().fg(Color::DarkGray));
-            f.render_widget(waiting, inner);
+            // No frame yet — show waiting message centered
+            let waiting = Paragraph::new(format!("🖥️  {} — waiting for frames...", role))
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(ratatui::layout::Alignment::Center);
+            f.render_widget(waiting, frame_area);
         }
 
         // Input box — so user can type /stop-share without leaving screen view
@@ -339,12 +318,17 @@ impl ChatUI {
         let (cx, cy) = Self::cursor_position(&self.input, self.cursor, inner_w);
         f.set_cursor_position((input_area.x + 1 + cx, input_area.y + 1 + cy));
 
-        // Status bar
+        // Status bar — includes role info + controls
         let status = Paragraph::new(Line::from(vec![
-            Span::styled(" Esc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" 🖥️  {} ", role),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("│ "),
+            Span::styled("Esc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::raw(" chat │ "),
             Span::styled("F5", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw(" toggle view │ "),
+            Span::raw(" toggle │ "),
             Span::styled(
                 if let Some(ref frame) = self.screen_frame {
                     format!("{}×{}", frame.width, frame.height)

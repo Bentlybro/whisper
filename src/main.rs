@@ -27,9 +27,10 @@ async fn main() -> Result<()> {
             identity,
             save,
             name,
+            graphics,
         } => {
             let identity_path = expand_path(&identity);
-            start_chat(&relay, &identity_path, save, name).await?;
+            start_chat(&relay, &identity_path, save, name, graphics).await?;
         }
         Commands::Relay { addr } => {
             relay::start_relay(addr).await?;
@@ -84,7 +85,7 @@ async fn init_identity(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn start_chat(relay_url: &str, identity_path: &PathBuf, _save_history: bool, nickname: Option<String>) -> Result<()> {
+async fn start_chat(relay_url: &str, identity_path: &PathBuf, _save_history: bool, nickname: Option<String>, graphics: Option<String>) -> Result<()> {
     // Load identity
     println!("🔐 Loading identity from: {}", identity_path.display());
     println!("Enter password:");
@@ -115,9 +116,9 @@ async fn start_chat(relay_url: &str, identity_path: &PathBuf, _save_history: boo
     println!("Starting TUI...");
     println!();
 
-    // Query terminal capabilities BEFORE entering raw mode / alternate screen.
-    // This detects Sixel, Kitty, iTerm2 protocols and font size.
-    let picker = screen::viewer::create_picker();
+    // Query terminal capabilities for graphics protocol detection.
+    // If --graphics flag is set, force that protocol. Otherwise auto-detect.
+    let picker = screen::viewer::create_picker(graphics.as_deref());
 
     // Small delay to let connection establish
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;

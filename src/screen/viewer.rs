@@ -11,23 +11,91 @@
 use anyhow::Result;
 use image::codecs::jpeg::JpegDecoder;
 use image::{DynamicImage, ImageDecoder, RgbImage};
-use ratatui_image::picker::Picker;
+use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::StatefulProtocol;
 use std::io::Cursor;
 
 use super::ScreenFrameData;
 
 /// Create a Picker by querying terminal capabilities.
-/// Must be called BEFORE entering raw mode / alternate screen.
-pub fn create_picker() -> Picker {
-    // Try to query the terminal for font size and protocol support
+///
+/// If `force_protocol` is Some, skip detection and use the specified protocol.
+/// Otherwise, try auto-detection, then env-var heuristics, then fall back to halfblocks.
+///
+/// Should be called BEFORE entering raw mode / alternate screen.
+pub fn create_picker(force_protocol: Option<&str>) -> Picker {
+    // If user explicitly forced a protocol via --graphics flag
+    if let Some(proto_name) = force_protocol {
+        let proto_type = match proto_name.to_lowercase().as_str() {
+            "sixel" => ProtocolType::Sixel,
+            "kitty" => ProtocolType::Kitty,
+            "iterm2" | "iterm" => ProtocolType::Iterm2,
+            "halfblocks" | "half" | "text" => ProtocolType::Halfblocks,
+            _ => {
+                eprintln!(
+                    "⚠️  Unknown graphics protocol '{}', using auto-detect",
+                    proto_name
+                );
+                return auto_detect_picker();
+            }
+        };
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(proto_type);
+        eprintln!("🖥️  Graphics: forced {:?}", proto_type);
+        return picker;
+    }
+
+    auto_detect_picker()
+}
+
+fn auto_detect_picker() -> Picker {
+    // Try the standard stdio query first
     match Picker::from_query_stdio() {
-        Ok(picker) => picker,
+        Ok(picker) => {
+            let proto = picker.protocol_type();
+            eprintln!("🖥️  Graphics: detected {:?}", proto);
+            picker
+        }
         Err(_) => {
-            // Fallback to halfblocks if query fails
-            Picker::halfblocks()
+            // Query failed — try env var heuristics before falling back
+            let picker = env_heuristic_picker();
+            eprintln!("🖥️  Graphics: {:?} (env heuristic)", picker.protocol_type());
+            picker
         }
     }
+}
+
+/// Try to guess the protocol from environment variables.
+/// WezTerm, Kitty, iTerm2 all set identifiable env vars.
+fn env_heuristic_picker() -> Picker {
+    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let term = std::env::var("TERM").unwrap_or_default();
+
+    let proto = if term_program.contains("WezTerm") {
+        // WezTerm supports Sixel, Kitty, and iTerm2 — Sixel is most reliable
+        ProtocolType::Sixel
+    } else if term_program.contains("iTerm") {
+        ProtocolType::Iterm2
+    } else if term.contains("xterm-kitty") || term_program.contains("kitty") {
+        ProtocolType::Kitty
+    } else if term_program.contains("ghostty") || term_program.contains("Ghostty") {
+        ProtocolType::Kitty
+    } else {
+        // Check TERM for sixel-capable terminals
+        let wt = std::env::var("WT_SESSION").unwrap_or_default();
+        if !wt.is_empty() {
+            // Windows Terminal sets WT_SESSION
+            ProtocolType::Sixel
+        } else {
+            ProtocolType::Halfblocks
+        }
+    };
+
+    let mut picker = Picker::halfblocks();
+    if proto != ProtocolType::Halfblocks {
+        picker.set_protocol_type(proto);
+    }
+    picker
 }
 
 /// Decoded frame ready for rendering

@@ -35,6 +35,11 @@ pub enum Commands {
         /// Your nickname (visible to other users after E2EE)
         #[arg(short, long)]
         name: Option<String>,
+
+        /// Force a graphics protocol for screen sharing (auto-detected by default).
+        /// Options: sixel, kitty, iterm2, halfblocks
+        #[arg(short, long)]
+        graphics: Option<String>,
     },
     
     /// Run a relay server
