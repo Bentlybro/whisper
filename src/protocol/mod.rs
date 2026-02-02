@@ -70,7 +70,7 @@ pub struct GroupInvite {
 }
 
 /// Plaintext message format (before encryption)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlainMessage {
     pub timestamp: i64,
     pub sender: String,
@@ -112,269 +112,70 @@ pub struct PlainMessage {
 }
 
 impl PlainMessage {
-    pub fn new(sender: String, content: String) -> Self {
+    /// Base message with sender and timestamp set, all other fields default
+    fn base(sender: String) -> Self {
         Self {
             timestamp: chrono::Utc::now().timestamp(),
             sender,
-            content,
-            system: false,
-            nickname: None,
-            direct: false,
-            dm_request: false,
-            file_offer: None,
-            file_chunk: None,
-            file_response: None,
-            group_id: None,
-            group_invite: None,
-            call_request: None,
-            call_accept: None,
-            call_hangup: None,
+            ..Default::default()
         }
+    }
+
+    pub fn new(sender: String, content: String) -> Self {
+        Self { content, ..Self::base(sender) }
     }
 
     pub fn direct(sender: String, content: String) -> Self {
-        Self {
-            timestamp: chrono::Utc::now().timestamp(),
-            sender,
-            content,
-            system: false,
-            nickname: None,
-            direct: true,
-            dm_request: false,
-            file_offer: None,
-            file_chunk: None,
-            file_response: None,
-            group_id: None,
-            group_invite: None,
-            call_request: None,
-            call_accept: None,
-            call_hangup: None,
-        }
+        Self { content, direct: true, ..Self::base(sender) }
     }
 
     pub fn system(sender: String, content: String) -> Self {
-        Self {
-            timestamp: chrono::Utc::now().timestamp(),
-            sender,
-            content,
-            system: true,
-            nickname: None,
-            direct: false,
-            dm_request: false,
-            file_offer: None,
-            file_chunk: None,
-            file_response: None,
-            group_id: None,
-            group_invite: None,
-            call_request: None,
-            call_accept: None,
-            call_hangup: None,
-        }
+        Self { content, system: true, ..Self::base(sender) }
     }
 
     pub fn nickname(sender: String, nickname: String) -> Self {
-        Self {
-            timestamp: chrono::Utc::now().timestamp(),
-            sender,
-            content: String::new(),
-            system: true,
-            nickname: Some(nickname),
-            direct: false,
-            dm_request: false,
-            file_offer: None,
-            file_chunk: None,
-            file_response: None,
-            group_id: None,
-            group_invite: None,
-            call_request: None,
-            call_accept: None,
-            call_hangup: None,
-        }
+        Self { system: true, nickname: Some(nickname), ..Self::base(sender) }
     }
 
     pub fn dm_request(sender: String) -> Self {
-        Self {
-            timestamp: chrono::Utc::now().timestamp(),
-            sender,
-            content: String::new(),
-            system: true,
-            nickname: None,
-            direct: true,
-            dm_request: true,
-            file_offer: None,
-            file_chunk: None,
-            file_response: None,
-            group_id: None,
-            group_invite: None,
-            call_request: None,
-            call_accept: None,
-            call_hangup: None,
-        }
+        Self { system: true, direct: true, dm_request: true, ..Self::base(sender) }
     }
 
     pub fn file_offer(sender: String, offer: FileOffer, direct: bool) -> Self {
-        Self {
-            timestamp: chrono::Utc::now().timestamp(),
-            sender,
-            content: String::new(),
-            system: false,
-            nickname: None,
-            direct,
-            dm_request: false,
-            file_offer: Some(offer),
-            file_chunk: None,
-            file_response: None,
-            group_id: None,
-            group_invite: None,
-            call_request: None,
-            call_accept: None,
-            call_hangup: None,
-        }
+        Self { direct, file_offer: Some(offer), ..Self::base(sender) }
     }
 
     pub fn file_chunk(sender: String, chunk: FileChunk, direct: bool) -> Self {
-        Self {
-            timestamp: chrono::Utc::now().timestamp(),
-            sender,
-            content: String::new(),
-            system: false,
-            nickname: None,
-            direct,
-            dm_request: false,
-            file_offer: None,
-            file_chunk: Some(chunk),
-            file_response: None,
-            group_id: None,
-            group_invite: None,
-            call_request: None,
-            call_accept: None,
-            call_hangup: None,
-        }
+        Self { direct, file_chunk: Some(chunk), ..Self::base(sender) }
     }
 
     pub fn file_response(sender: String, file_id: String, accept: bool, direct: bool) -> Self {
-        Self {
-            timestamp: chrono::Utc::now().timestamp(),
-            sender,
-            content: file_id,
-            system: false,
-            nickname: None,
-            direct,
-            dm_request: false,
-            file_offer: None,
-            file_chunk: None,
-            file_response: Some(accept),
-            group_id: None,
-            group_invite: None,
-            call_request: None,
-            call_accept: None,
-            call_hangup: None,
-        }
+        Self { content: file_id, direct, file_response: Some(accept), ..Self::base(sender) }
     }
 
     /// A group chat message
     pub fn group(sender: String, content: String, group_id: String) -> Self {
-        Self {
-            timestamp: chrono::Utc::now().timestamp(),
-            sender,
-            content,
-            system: false,
-            nickname: None,
-            direct: false,
-            dm_request: false,
-            file_offer: None,
-            file_chunk: None,
-            file_response: None,
-            group_id: Some(group_id),
-            group_invite: None,
-            call_request: None,
-            call_accept: None,
-            call_hangup: None,
-        }
+        Self { content, group_id: Some(group_id), ..Self::base(sender) }
     }
 
     /// A group invite sent via DM
     pub fn group_invite_msg(sender: String, invite: GroupInvite) -> Self {
-        Self {
-            timestamp: chrono::Utc::now().timestamp(),
-            sender,
-            content: String::new(),
-            system: true,
-            nickname: None,
-            direct: true,
-            dm_request: false,
-            file_offer: None,
-            file_chunk: None,
-            file_response: None,
-            group_id: None,
-            group_invite: Some(invite),
-            call_request: None,
-            call_accept: None,
-            call_hangup: None,
-        }
+        Self { system: true, direct: true, group_invite: Some(invite), ..Self::base(sender) }
     }
 
     /// Voice call request
     pub fn call_request(sender: String) -> Self {
-        Self {
-            timestamp: chrono::Utc::now().timestamp(),
-            sender,
-            content: String::new(),
-            system: true,
-            nickname: None,
-            direct: true,
-            dm_request: false,
-            file_offer: None,
-            file_chunk: None,
-            file_response: None,
-            group_id: None,
-            group_invite: None,
-            call_request: Some(true),
-            call_accept: None,
-            call_hangup: None,
-        }
+        Self { system: true, direct: true, call_request: Some(true), ..Self::base(sender) }
     }
 
     /// Voice call accept/reject
     pub fn call_accept(sender: String, accept: bool) -> Self {
-        Self {
-            timestamp: chrono::Utc::now().timestamp(),
-            sender,
-            content: String::new(),
-            system: true,
-            nickname: None,
-            direct: true,
-            dm_request: false,
-            file_offer: None,
-            file_chunk: None,
-            file_response: None,
-            group_id: None,
-            group_invite: None,
-            call_request: None,
-            call_accept: Some(accept),
-            call_hangup: None,
-        }
+        Self { system: true, direct: true, call_accept: Some(accept), ..Self::base(sender) }
     }
 
     /// Voice call hangup
     pub fn call_hangup(sender: String) -> Self {
-        Self {
-            timestamp: chrono::Utc::now().timestamp(),
-            sender,
-            content: String::new(),
-            system: true,
-            nickname: None,
-            direct: true,
-            dm_request: false,
-            file_offer: None,
-            file_chunk: None,
-            file_response: None,
-            group_id: None,
-            group_invite: None,
-            call_request: None,
-            call_accept: None,
-            call_hangup: Some(true),
-        }
+        Self { system: true, direct: true, call_hangup: Some(true), ..Self::base(sender) }
     }
 }
 
