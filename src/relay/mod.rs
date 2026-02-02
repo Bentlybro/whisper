@@ -185,6 +185,15 @@ async fn handle_connection(stream: TcpStream, peers: PeerMap, rooms: RoomMap) ->
                             }
                         }
                     }
+                    Message::ScreenFrame { ref target, .. } => {
+                        // Forward to target peer only (like Encrypted with target)
+                        if !target.is_empty() {
+                            let peers_read = peers.read().await;
+                            if let Some(peer_tx) = peers_read.get(target) {
+                                let _ = peer_tx.send(data.clone());
+                            }
+                        }
+                    }
                     Message::GroupEncrypted { from, group_id, .. } => {
                         // Forward to all members of the group room except sender
                         let rooms_read = rooms.read().await;

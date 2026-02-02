@@ -4,6 +4,7 @@ mod files;
 mod groups;
 mod helpers;
 mod render;
+mod screen_share;
 mod types;
 
 use anyhow::Result;
@@ -59,6 +60,13 @@ pub struct ChatUI {
     pub(crate) read_status: HashMap<String, ReadStatus>,
     // Command autocomplete state
     pub(crate) autocomplete: Option<AutocompleteState>,
+    // Screen sharing state
+    pub(crate) screen_capture: Option<crate::screen::capture::ScreenCapture>,
+    pub(crate) screen_capture_rx: Option<mpsc::UnboundedReceiver<crate::screen::ScreenFrameData>>,
+    pub(crate) screen_share_target: Option<String>, // peer_id we're sharing to
+    pub(crate) screen_viewer: Option<crate::screen::viewer::ScreenViewer>,
+    pub(crate) screen_viewer_from: Option<String>, // peer_id sharing with us
+    pub(crate) pending_screen_share_from: Option<String>, // incoming screen share request
 }
 
 impl ChatUI {
@@ -92,6 +100,12 @@ impl ChatUI {
             last_typing_sent: None,
             read_status: HashMap::new(),
             autocomplete: None,
+            screen_capture: None,
+            screen_capture_rx: None,
+            screen_share_target: None,
+            screen_viewer: None,
+            screen_viewer_from: None,
+            pending_screen_share_from: None,
         }
     }
 
@@ -102,6 +116,7 @@ impl ChatUI {
         mut status_rx: mpsc::UnboundedReceiver<String>,
         mut peer_update_rx: mpsc::UnboundedReceiver<HashMap<String, PeerDisplay>>,
         mut audio_in_rx: mpsc::UnboundedReceiver<(String, Vec<u8>)>,
+        mut screen_in_rx: mpsc::UnboundedReceiver<(String, Vec<u8>)>,
     ) -> Result<()> {
         // Setup terminal - no mouse capture so native text selection works
         enable_raw_mode()?;
@@ -110,7 +125,7 @@ impl ChatUI {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
-        let result = self.run_loop(&mut terminal, &mut msg_tx, &mut incoming_rx, &mut status_rx, &mut peer_update_rx, &mut audio_in_rx).await;
+        let result = self.run_loop(&mut terminal, &mut msg_tx, &mut incoming_rx, &mut status_rx, &mut peer_update_rx, &mut audio_in_rx, &mut screen_in_rx).await;
 
         // Restore terminal
         disable_raw_mode()?;
@@ -140,6 +155,10 @@ impl ChatUI {
             CommandEntry { name: "send".to_string(), description: "Share a file: /send <filepath>".to_string() },
             CommandEntry { name: "accept".to_string(), description: "Accept file offer: /accept [path]".to_string() },
             CommandEntry { name: "reject".to_string(), description: "Reject file offer".to_string() },
+            CommandEntry { name: "share-screen".to_string(), description: "Start sharing your screen".to_string() },
+            CommandEntry { name: "stop-share".to_string(), description: "Stop screen sharing".to_string() },
+            CommandEntry { name: "accept-screen".to_string(), description: "Accept incoming screen share".to_string() },
+            CommandEntry { name: "reject-screen".to_string(), description: "Reject incoming screen share".to_string() },
         ]
     }
 
@@ -266,6 +285,7 @@ impl ChatUI {
         status_rx: &mut mpsc::UnboundedReceiver<String>,
         peer_update_rx: &mut mpsc::UnboundedReceiver<HashMap<String, PeerDisplay>>,
         audio_in_rx: &mut mpsc::UnboundedReceiver<(String, Vec<u8>)>,
+        screen_in_rx: &mut mpsc::UnboundedReceiver<(String, Vec<u8>)>,
     ) -> Result<()> {
         let mut opus_decoder: Option<audiopus::coder::Decoder> = None;
         let mut read_receipt_timer = std::time::Instant::now();
@@ -462,6 +482,20 @@ impl ChatUI {
                     continue;
                 }
 
+                // Handle screen share signaling
+                if msg.screen_share_request == Some(true) {
+                    self.handle_incoming_screen_request(&msg);
+                    continue;
+                }
+                if let Some(accept) = msg.screen_share_accept {
+                    self.handle_screen_share_response(&msg, accept);
+                    continue;
+                }
+                if msg.screen_share_stop == Some(true) {
+                    self.handle_screen_share_stop(&msg);
+                    continue;
+                }
+
                 // Handle group invites
                 if let Some(ref invite) = msg.group_invite {
                     self.handle_group_invite(msg.clone(), invite.clone(), msg_tx);
@@ -573,6 +607,60 @@ impl ChatUI {
                             }
                         }
                     }
+                }
+            }
+
+            // Handle incoming screen frames
+            while let Ok((from, frame_data)) = screen_in_rx.try_recv() {
+                // Only accept frames from the peer we're viewing
+                let accept = self.screen_viewer_from.as_ref() == Some(&from);
+                if accept {
+                    if let Ok(frame) = rmp_serde::from_slice::<crate::screen::ScreenFrameData>(&frame_data) {
+                        if let Some(ref viewer) = self.screen_viewer {
+                            if !viewer.is_running() {
+                                // Viewer window was closed
+                                self.screen_viewer = None;
+                                self.screen_viewer_from = None;
+                                // Notify peer we stopped watching
+                                let stop_msg = PlainMessage::screen_share_stop(self.own_id.clone());
+                                let _ = msg_tx.send(OutgoingMessage::Direct {
+                                    target_id: from.clone(),
+                                    message: stop_msg,
+                                });
+                                let peer_name = self.get_peer_display_name(&from);
+                                self.status = format!("Screen share from {} ended", peer_name);
+                            } else {
+                                viewer.send_frame(frame);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Send captured screen frames to peer
+            if let Some(ref target_id) = self.screen_share_target.clone() {
+                if let Some(ref mut capture_rx) = self.screen_capture_rx {
+                    // Drain all, send latest (drop stale frames)
+                    let mut latest = None;
+                    while let Ok(frame) = capture_rx.try_recv() {
+                        latest = Some(frame);
+                    }
+                    if let Some(frame) = latest {
+                        if let Ok(serialized) = rmp_serde::to_vec(&frame) {
+                            let _ = msg_tx.send(OutgoingMessage::ScreenFrame {
+                                target_id: target_id.clone(),
+                                data: serialized,
+                            });
+                        }
+                    }
+                }
+
+                // Check if capture is still running
+                if self.screen_capture.is_some() {
+                    // Capture is still alive — nothing to do
+                } else {
+                    // Capture was already cleaned up
+                    self.screen_share_target = None;
                 }
             }
 

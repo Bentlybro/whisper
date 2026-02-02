@@ -24,6 +24,7 @@ const MAX_SKIP: u32 = 100;
 /// Info strings for HKDF domain separation
 const KDF_RK_INFO: &[u8] = b"wsp-ratchet-root";
 const KDF_VOICE_INFO: &[u8] = b"wsp-voice-key";
+const KDF_SCREEN_INFO: &[u8] = b"wsp-screen-key";
 
 /// Header sent with each ratcheted message
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +80,9 @@ pub struct RatchetSession {
 
     // Cached voice key (derived from voice_base_key, stable during call)
     voice_key: Option<[u8; 32]>,
+
+    // Cached screen share key (derived from voice_base_key, stable during session)
+    screen_key: Option<[u8; 32]>,
 }
 
 impl Drop for RatchetSession {
@@ -97,6 +101,9 @@ impl Drop for RatchetSession {
         self.voice_base_key.zeroize();
         if let Some(ref mut vk) = self.voice_key {
             vk.zeroize();
+        }
+        if let Some(ref mut sk) = self.screen_key {
+            sk.zeroize();
         }
     }
 }
@@ -155,6 +162,7 @@ impl RatchetSession {
             initial_ratchet_done: false,
             voice_base_key,
             voice_key: None,
+            screen_key: None,
         }
     }
 
@@ -262,6 +270,28 @@ impl RatchetSession {
             .expect("HKDF expand failed");
         self.voice_key = Some(vk);
         vk
+    }
+
+    /// Derive (or return cached) screen share key for frame encryption.
+    /// Uses the stable voice_base_key with different HKDF info.
+    pub fn derive_screen_key(&mut self) -> [u8; 32] {
+        if let Some(sk) = self.screen_key {
+            return sk;
+        }
+        let hk = Hkdf::<Sha256>::new(None, &self.voice_base_key);
+        let mut sk = [0u8; 32];
+        hk.expand(KDF_SCREEN_INFO, &mut sk)
+            .expect("HKDF expand failed");
+        self.screen_key = Some(sk);
+        sk
+    }
+
+    /// Clear cached screen share key
+    pub fn clear_screen_key(&mut self) {
+        if let Some(ref mut sk) = self.screen_key {
+            sk.zeroize();
+        }
+        self.screen_key = None;
     }
 
     /// Clear cached voice key (call this when a voice call ends)

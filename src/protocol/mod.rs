@@ -73,6 +73,13 @@ pub enum Message {
         target: String,
         message_id: String,
     },
+    /// Encrypted screen frame — relay forwards to target peer only
+    ScreenFrame {
+        from: String,
+        target: String,
+        nonce: Vec<u8>,
+        ciphertext: Vec<u8>,
+    },
 }
 
 /// File offer metadata
@@ -149,6 +156,15 @@ pub struct PlainMessage {
     /// Read receipt — contains the message_id that was read
     #[serde(default)]
     pub read_receipt: Option<String>,
+    /// Screen share request (true = requesting to share screen)
+    #[serde(default)]
+    pub screen_share_request: Option<bool>,
+    /// Screen share accept/reject (true = accept, false = reject)
+    #[serde(default)]
+    pub screen_share_accept: Option<bool>,
+    /// Screen share stop notification
+    #[serde(default)]
+    pub screen_share_stop: Option<bool>,
 }
 
 impl PlainMessage {
@@ -226,6 +242,36 @@ impl PlainMessage {
     /// Read receipt for a specific message
     pub fn read_receipt(sender: String, message_id: String, direct: bool) -> Self {
         Self { system: true, direct, read_receipt: Some(message_id), ..Self::base(sender) }
+    }
+
+    /// Screen share request
+    pub fn screen_share_request(sender: String) -> Self {
+        Self {
+            system: true,
+            direct: true,
+            screen_share_request: Some(true),
+            ..Self::base(sender)
+        }
+    }
+
+    /// Screen share accept/reject
+    pub fn screen_share_accept(sender: String, accept: bool) -> Self {
+        Self {
+            system: true,
+            direct: true,
+            screen_share_accept: Some(accept),
+            ..Self::base(sender)
+        }
+    }
+
+    /// Screen share stop
+    pub fn screen_share_stop(sender: String) -> Self {
+        Self {
+            system: true,
+            direct: true,
+            screen_share_stop: Some(true),
+            ..Self::base(sender)
+        }
     }
 
     /// Generate a unique message ID

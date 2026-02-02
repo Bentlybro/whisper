@@ -42,6 +42,8 @@ pub enum OutgoingMessage {
     LeaveRoom { group_id: String },
     /// Send an encrypted audio frame (raw, no PlainMessage overhead)
     Audio { target_id: String, data: Vec<u8> },
+    /// Send an encrypted screen frame
+    ScreenFrame { target_id: String, data: Vec<u8> },
     /// Lightweight signal — bypasses ratchet, sent as plaintext
     Signal(crate::protocol::Message),
 }
@@ -90,6 +92,7 @@ impl ChatClient {
         mpsc::UnboundedReceiver<String>, // Status messages
         mpsc::UnboundedReceiver<HashMap<String, PeerDisplay>>, // Peer updates
         mpsc::UnboundedReceiver<(String, Vec<u8>)>, // Incoming audio frames (peer_id, decrypted_opus_data)
+        mpsc::UnboundedReceiver<(String, Vec<u8>)>, // Incoming screen frames (peer_id, decrypted_frame_data)
     )> {
         // Channels for communication with TUI (persist across reconnects)
         let (msg_tx, msg_rx) = mpsc::unbounded_channel::<OutgoingMessage>();
@@ -97,6 +100,7 @@ impl ChatClient {
         let (status_tx, status_rx) = mpsc::unbounded_channel::<String>();
         let (peer_update_tx, peer_update_rx) = mpsc::unbounded_channel::<HashMap<String, PeerDisplay>>();
         let (audio_in_tx, audio_in_rx) = mpsc::unbounded_channel::<(String, Vec<u8>)>();
+        let (screen_in_tx, screen_in_rx) = mpsc::unbounded_channel::<(String, Vec<u8>)>();
 
         let identity = self.identity.clone_for_thread();
         let session_id = self.session_id.clone();
@@ -114,6 +118,7 @@ impl ChatClient {
         let peers_reconnect = peers.clone();
         let status_tx_reconnect = status_tx.clone();
         let audio_in_tx_reconnect = audio_in_tx.clone();
+        let screen_in_tx_reconnect = screen_in_tx.clone();
         tokio::spawn(async move {
             let mut reconnect_delay = 1u64;
             let mut attempt = 0u32;
@@ -132,6 +137,7 @@ impl ChatClient {
                     status_tx_reconnect.clone(),
                     peer_update_tx.clone(),
                     audio_in_tx_reconnect.clone(),
+                    screen_in_tx_reconnect.clone(),
                     attempt,
                 ).await {
                     Ok(_) => {
@@ -154,7 +160,7 @@ impl ChatClient {
             }
         });
 
-        Ok((msg_tx, incoming_rx, status_rx, peer_update_rx, audio_in_rx))
+        Ok((msg_tx, incoming_rx, status_rx, peer_update_rx, audio_in_rx, screen_in_rx))
     }
 
     async fn establish_connection(
@@ -169,6 +175,7 @@ impl ChatClient {
         status_tx: mpsc::UnboundedSender<String>,
         peer_update_tx: mpsc::UnboundedSender<HashMap<String, PeerDisplay>>,
         audio_in_tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
+        screen_in_tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
         attempt: u32,
     ) -> Result<()> {
         // Connect to relay
@@ -442,6 +449,19 @@ impl ChatClient {
                                         }
                                     }
                                 }
+                                Message::ScreenFrame { from, target: _, nonce, ciphertext } => {
+                                    if from == session_id_recv {
+                                        continue;
+                                    }
+                                    // Decrypt screen frame with cached screen key
+                                    let mut peers_map = peers_recv.write().await;
+                                    if let Some(peer_info) = peers_map.get_mut(&from) {
+                                        let screen_key = peer_info.ratchet.derive_screen_key();
+                                        if let Ok(frame_data) = decrypt_message(&screen_key, &nonce, &ciphertext) {
+                                            let _ = screen_in_tx.send((from, frame_data));
+                                        }
+                                    }
+                                }
                                 Message::Typing { from, target: _, is_typing } => {
                                     if from == session_id_recv { continue; }
                                     // Convert to PlainMessage for TUI
@@ -656,6 +676,28 @@ impl ChatClient {
                                                 ciphertext,
                                             };
                                             if let Ok(data) = bincode::serialize(&audio_msg) {
+                                                drop(peers_map);
+                                                if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
+                                                    let _ = failure_tx_send.send("Send failed".to_string());
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                OutgoingMessage::ScreenFrame { target_id, data: frame_data } => {
+                                    // Encrypt screen frame with cached screen key — fast path
+                                    let mut peers_map = peers_send.write().await;
+                                    if let Some(peer_info) = peers_map.get_mut(&target_id) {
+                                        let screen_key = peer_info.ratchet.derive_screen_key();
+                                        if let Ok((nonce, ciphertext)) = encrypt_message(&screen_key, &frame_data) {
+                                            let screen_msg = Message::ScreenFrame {
+                                                from: session_id_send.clone(),
+                                                target: target_id.clone(),
+                                                nonce,
+                                                ciphertext,
+                                            };
+                                            if let Ok(data) = bincode::serialize(&screen_msg) {
                                                 drop(peers_map);
                                                 if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
                                                     let _ = failure_tx_send.send("Send failed".to_string());

@@ -4,6 +4,7 @@ mod client;
 mod crypto;
 mod protocol;
 mod relay;
+mod screen;
 mod storage;
 mod tui;
 
@@ -108,7 +109,7 @@ async fn start_chat(relay_url: &str, identity_path: &PathBuf, _save_history: boo
     println!("🔗 Session ID: {}", session_id);
     println!();
 
-    let (msg_tx, incoming_rx, status_rx, peer_update_rx, audio_in_rx) = client.connect().await?;
+    let (msg_tx, incoming_rx, status_rx, peer_update_rx, audio_in_rx, screen_in_rx) = client.connect().await?;
 
     println!("✅ Connected! Share your Session ID with peers to start chatting.");
     println!("Starting TUI...");
@@ -118,7 +119,7 @@ async fn start_chat(relay_url: &str, identity_path: &PathBuf, _save_history: boo
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let mut ui = tui::ChatUI::new(session_id, nickname, own_public_key);
-    ui.run(msg_tx, incoming_rx, status_rx, peer_update_rx, audio_in_rx).await?;
+    ui.run(msg_tx, incoming_rx, status_rx, peer_update_rx, audio_in_rx, screen_in_rx).await?;
 
     Ok(())
 }

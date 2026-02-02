@@ -118,6 +118,18 @@ impl ChatUI {
                 "reject" => {
                     self.handle_reject_command(msg_tx);
                 }
+                "share-screen" => {
+                    self.handle_share_screen_command(msg_tx);
+                }
+                "stop-share" => {
+                    self.handle_stop_share_command(msg_tx);
+                }
+                "accept-screen" => {
+                    self.handle_accept_screen_command(msg_tx);
+                }
+                "reject-screen" => {
+                    self.handle_reject_screen_command(msg_tx);
+                }
                 _ => {
                     self.status = format!("Unknown command: /{}", parts[0]);
                 }
