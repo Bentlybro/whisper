@@ -4,6 +4,29 @@ use crate::protocol::FileOffer;
 
 pub const FILE_CHUNK_SIZE: usize = 16384; // 16KB chunks for file transfer
 
+/// Read receipt status for a message
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReadStatus {
+    Sent,      // ✓  — message sent/delivered
+    Read,      // ✓✓ — peer has seen it
+}
+
+/// Command entry for autocomplete
+#[derive(Clone, Debug)]
+pub struct CommandEntry {
+    pub name: String,
+    pub description: String,
+}
+
+/// Autocomplete popup state
+#[derive(Clone, Debug)]
+pub struct AutocompleteState {
+    pub commands: Vec<CommandEntry>,
+    pub filtered: Vec<usize>,  // indices into commands
+    pub selected: usize,       // index into filtered
+    pub filter: String,        // current filter text (after /)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Tab {
     Global,

@@ -119,6 +119,15 @@ pub struct PlainMessage {
     /// Voice call hangup
     #[serde(default)]
     pub call_hangup: Option<bool>,
+    /// Unique message ID for tracking read receipts
+    #[serde(default)]
+    pub message_id: Option<String>,
+    /// Typing indicator (true = started typing, false = stopped)
+    #[serde(default)]
+    pub typing: Option<bool>,
+    /// Read receipt — contains the message_id that was read
+    #[serde(default)]
+    pub read_receipt: Option<String>,
 }
 
 impl PlainMessage {
@@ -186,6 +195,23 @@ impl PlainMessage {
     /// Voice call hangup
     pub fn call_hangup(sender: String) -> Self {
         Self { system: true, direct: true, call_hangup: Some(true), ..Self::base(sender) }
+    }
+
+    /// Typing indicator
+    pub fn typing(sender: String, is_typing: bool, direct: bool) -> Self {
+        Self { system: true, direct, typing: Some(is_typing), ..Self::base(sender) }
+    }
+
+    /// Read receipt for a specific message
+    pub fn read_receipt(sender: String, message_id: String, direct: bool) -> Self {
+        Self { system: true, direct, read_receipt: Some(message_id), ..Self::base(sender) }
+    }
+
+    /// Generate a unique message ID
+    pub fn generate_id() -> String {
+        use rand::Rng;
+        let random_bytes: Vec<u8> = (0..8).map(|_| rand::thread_rng().gen()).collect();
+        hex::encode(random_bytes)
     }
 }
 

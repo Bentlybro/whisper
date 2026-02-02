@@ -22,7 +22,8 @@ use crate::client::{OutgoingMessage, PeerDisplay};
 use crate::protocol::PlainMessage;
 
 use types::{
-    ActiveTransfer, CallState, CallType, GroupInfo, OutgoingTransfer, PendingFileOffer, Tab,
+    ActiveTransfer, AutocompleteState, CallState, CallType, CommandEntry, GroupInfo,
+    OutgoingTransfer, PendingFileOffer, ReadStatus, Tab,
 };
 
 pub struct ChatUI {
@@ -49,6 +50,15 @@ pub struct ChatUI {
     pub(crate) pending_group_call: Option<(String, String)>,
     pub(crate) audio_pipeline: Option<AudioPipeline>,
     pub(crate) audio_capture_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    // Scroll state per tab (0 = at bottom)
+    pub(crate) scroll_offset: HashMap<Tab, usize>,
+    // Typing indicators: peer_id -> last typing timestamp
+    pub(crate) typing_peers: HashMap<String, std::time::Instant>,
+    pub(crate) last_typing_sent: Option<std::time::Instant>,
+    // Read receipts: message_id -> ReadStatus
+    pub(crate) read_status: HashMap<String, ReadStatus>,
+    // Command autocomplete state
+    pub(crate) autocomplete: Option<AutocompleteState>,
 }
 
 impl ChatUI {
@@ -77,6 +87,11 @@ impl ChatUI {
             pending_group_call: None,
             audio_pipeline: None,
             audio_capture_rx: None,
+            scroll_offset: HashMap::new(),
+            typing_peers: HashMap::new(),
+            last_typing_sent: None,
+            read_status: HashMap::new(),
+            autocomplete: None,
         }
     }
 
@@ -108,6 +123,151 @@ impl ChatUI {
         result
     }
 
+    /// Get all available commands for autocomplete
+    pub(crate) fn get_all_commands() -> Vec<CommandEntry> {
+        vec![
+            CommandEntry { name: "help".to_string(), description: "Show this command list".to_string() },
+            CommandEntry { name: "dm".to_string(), description: "Open DM with a peer: /dm <nick|id>".to_string() },
+            CommandEntry { name: "nick".to_string(), description: "Change nickname: /nick <name>".to_string() },
+            CommandEntry { name: "group".to_string(), description: "Group commands: create/invite/leave/members".to_string() },
+            CommandEntry { name: "call".to_string(), description: "Start a voice call in current tab".to_string() },
+            CommandEntry { name: "accept-call".to_string(), description: "Accept incoming call".to_string() },
+            CommandEntry { name: "reject-call".to_string(), description: "Reject incoming call".to_string() },
+            CommandEntry { name: "hangup".to_string(), description: "End current call".to_string() },
+            CommandEntry { name: "mute".to_string(), description: "Toggle microphone mute".to_string() },
+            CommandEntry { name: "verify".to_string(), description: "Show safety number for peer".to_string() },
+            CommandEntry { name: "verified".to_string(), description: "Mark peer as verified".to_string() },
+            CommandEntry { name: "send".to_string(), description: "Share a file: /send <filepath>".to_string() },
+            CommandEntry { name: "accept".to_string(), description: "Accept file offer: /accept [path]".to_string() },
+            CommandEntry { name: "reject".to_string(), description: "Reject file offer".to_string() },
+        ]
+    }
+
+    /// Update autocomplete state based on current input
+    fn update_autocomplete(&mut self) {
+        let input_str: String = self.input.iter().collect();
+        if input_str.starts_with('/') && !input_str.contains(' ') {
+            let filter = input_str[1..].to_lowercase();
+            let commands = Self::get_all_commands();
+            let filtered: Vec<usize> = commands.iter().enumerate()
+                .filter(|(_, cmd)| cmd.name.starts_with(&filter))
+                .map(|(i, _)| i)
+                .collect();
+
+            if !filtered.is_empty() {
+                let selected = if let Some(ref ac) = self.autocomplete {
+                    ac.selected.min(filtered.len().saturating_sub(1))
+                } else {
+                    0
+                };
+                self.autocomplete = Some(AutocompleteState {
+                    commands,
+                    filtered,
+                    selected,
+                    filter,
+                });
+            } else {
+                self.autocomplete = None;
+            }
+        } else {
+            self.autocomplete = None;
+        }
+    }
+
+    /// Send typing indicator to current tab's peers (debounced)
+    fn send_typing_indicator(&mut self, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        let now = std::time::Instant::now();
+        // Debounce: only send every 3 seconds
+        if let Some(last) = self.last_typing_sent {
+            if now.duration_since(last).as_secs() < 3 {
+                return;
+            }
+        }
+        self.last_typing_sent = Some(now);
+
+        let current_tab = &self.tabs[self.active_tab].clone();
+        match current_tab {
+            Tab::DirectMessage(peer_id) => {
+                let typing_msg = PlainMessage::typing(self.own_id.clone(), true, true);
+                let _ = msg_tx.send(OutgoingMessage::Direct {
+                    target_id: peer_id.clone(),
+                    message: typing_msg,
+                });
+            }
+            Tab::Group(group_id) => {
+                if let Some(group) = self.groups.get(group_id) {
+                    let mut typing_msg = PlainMessage::typing(self.own_id.clone(), true, false);
+                    typing_msg.group_id = Some(group_id.clone());
+                    let member_ids = group.members.clone();
+                    let _ = msg_tx.send(OutgoingMessage::Group {
+                        group_id: group_id.clone(),
+                        member_ids,
+                        message: typing_msg,
+                    });
+                }
+            }
+            Tab::Global => {
+                let typing_msg = PlainMessage::typing(self.own_id.clone(), true, false);
+                let _ = msg_tx.send(OutgoingMessage::Global(typing_msg));
+            }
+        }
+    }
+
+    /// Send read receipts for visible messages in the current tab
+    fn send_read_receipts(&mut self, msg_tx: &mut mpsc::UnboundedSender<OutgoingMessage>) {
+        let current_tab = self.tabs[self.active_tab].clone();
+        let messages = match self.messages.get(&current_tab) {
+            Some(msgs) => msgs.clone(),
+            None => return,
+        };
+
+        for msg in &messages {
+            if msg.sender == self.own_id || msg.system {
+                continue;
+            }
+            if let Some(ref msg_id) = msg.message_id {
+                if self.read_status.get(msg_id) == Some(&ReadStatus::Read) {
+                    continue; // Already sent read receipt
+                }
+                // Mark as read and send receipt
+                self.read_status.insert(msg_id.clone(), ReadStatus::Read);
+
+                let is_direct = msg.direct;
+                let receipt = PlainMessage::read_receipt(self.own_id.clone(), msg_id.clone(), is_direct);
+
+                match &current_tab {
+                    Tab::DirectMessage(peer_id) => {
+                        let _ = msg_tx.send(OutgoingMessage::Direct {
+                            target_id: peer_id.clone(),
+                            message: receipt,
+                        });
+                    }
+                    Tab::Group(_group_id) => {
+                        // Send receipt directly to the sender
+                        let _ = msg_tx.send(OutgoingMessage::Direct {
+                            target_id: msg.sender.clone(),
+                            message: receipt,
+                        });
+                    }
+                    Tab::Global => {
+                        let _ = msg_tx.send(OutgoingMessage::Direct {
+                            target_id: msg.sender.clone(),
+                            message: receipt,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Clean up expired typing indicators (>5 seconds old)
+    fn cleanup_typing_indicators(&mut self) {
+        let now = std::time::Instant::now();
+        self.typing_peers.retain(|_, instant| {
+            now.duration_since(*instant).as_secs() < 5
+        });
+    }
+
     async fn run_loop(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -118,13 +278,77 @@ impl ChatUI {
         audio_in_rx: &mut mpsc::UnboundedReceiver<(String, Vec<u8>)>,
     ) -> Result<()> {
         let mut opus_decoder: Option<audiopus::coder::Decoder> = None;
+        let mut read_receipt_timer = std::time::Instant::now();
         loop {
             terminal.draw(|f| self.ui(f))?;
+
+            // Periodically clean up typing indicators and send read receipts
+            self.cleanup_typing_indicators();
+            if read_receipt_timer.elapsed().as_secs() >= 2 {
+                self.send_read_receipts(msg_tx);
+                read_receipt_timer = std::time::Instant::now();
+            }
 
             // Handle events with timeout
             if event::poll(std::time::Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
+                        // Handle autocomplete navigation first
+                        if self.autocomplete.is_some() {
+                            match key.code {
+                                KeyCode::Up => {
+                                    if let Some(ref mut ac) = self.autocomplete {
+                                        if ac.selected > 0 {
+                                            ac.selected -= 1;
+                                        } else {
+                                            ac.selected = ac.filtered.len().saturating_sub(1);
+                                        }
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Down => {
+                                    if let Some(ref mut ac) = self.autocomplete {
+                                        if ac.selected < ac.filtered.len().saturating_sub(1) {
+                                            ac.selected += 1;
+                                        } else {
+                                            ac.selected = 0;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Enter => {
+                                    if let Some(ref ac) = self.autocomplete {
+                                        if let Some(&cmd_idx) = ac.filtered.get(ac.selected) {
+                                            let cmd_name = ac.commands[cmd_idx].name.clone();
+                                            self.input = format!("/{} ", cmd_name).chars().collect();
+                                            self.cursor = self.input.len();
+                                        }
+                                    }
+                                    self.autocomplete = None;
+                                    continue;
+                                }
+                                KeyCode::Esc => {
+                                    self.autocomplete = None;
+                                    continue;
+                                }
+                                KeyCode::Tab => {
+                                    // Tab-complete the selected command
+                                    if let Some(ref ac) = self.autocomplete {
+                                        if let Some(&cmd_idx) = ac.filtered.get(ac.selected) {
+                                            let cmd_name = ac.commands[cmd_idx].name.clone();
+                                            self.input = format!("/{} ", cmd_name).chars().collect();
+                                            self.cursor = self.input.len();
+                                        }
+                                    }
+                                    self.autocomplete = None;
+                                    continue;
+                                }
+                                _ => {
+                                    // Fall through to normal handling, autocomplete will update
+                                }
+                            }
+                        }
+
                         match key.code {
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 let nick = self.display_name();
@@ -145,19 +369,39 @@ impl ChatUI {
                             KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 self.next_tab();
                             }
+                            // Scroll: Up/Down with Alt, PgUp/PgDown
+                            KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
+                                self.scroll_up(1);
+                            }
+                            KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
+                                self.scroll_down(1);
+                            }
+                            KeyCode::PageUp => {
+                                self.scroll_up(10);
+                            }
+                            KeyCode::PageDown => {
+                                self.scroll_down(10);
+                            }
                             KeyCode::Char(c) => {
                                 self.input.insert(self.cursor, c);
                                 self.cursor += 1;
+                                self.update_autocomplete();
+                                // Send typing indicator for non-command input
+                                if !self.input.starts_with(&['/']) {
+                                    self.send_typing_indicator(msg_tx);
+                                }
                             }
                             KeyCode::Backspace => {
                                 if self.cursor > 0 {
                                     self.cursor -= 1;
                                     self.input.remove(self.cursor);
+                                    self.update_autocomplete();
                                 }
                             }
                             KeyCode::Delete => {
                                 if self.cursor < self.input.len() {
                                     self.input.remove(self.cursor);
+                                    self.update_autocomplete();
                                 }
                             }
                             KeyCode::Left => {
@@ -186,6 +430,8 @@ impl ChatUI {
                                     self.handle_input(text, msg_tx);
                                     self.input.clear();
                                     self.cursor = 0;
+                                    self.autocomplete = None;
+                                    self.last_typing_sent = None;
                                 }
                             }
                             _ => {}
@@ -196,6 +442,22 @@ impl ChatUI {
 
             // Check for incoming messages
             while let Ok(msg) = incoming_rx.try_recv() {
+                // Handle typing indicators
+                if let Some(is_typing) = msg.typing {
+                    if is_typing {
+                        self.typing_peers.insert(msg.sender.clone(), std::time::Instant::now());
+                    } else {
+                        self.typing_peers.remove(&msg.sender);
+                    }
+                    continue;
+                }
+
+                // Handle read receipts
+                if let Some(ref receipt_msg_id) = msg.read_receipt {
+                    self.read_status.insert(receipt_msg_id.clone(), ReadStatus::Read);
+                    continue;
+                }
+
                 // Handle voice call signaling
                 if msg.call_request == Some(true) {
                     self.handle_incoming_call_request(&msg, msg_tx);
@@ -226,6 +488,29 @@ impl ChatUI {
                 } else if let Some(accept) = msg.file_response {
                     self.handle_file_response(msg.clone(), accept, msg_tx);
                     continue;
+                }
+
+                // Clear typing indicator for sender (they sent a real message)
+                self.typing_peers.remove(&msg.sender);
+
+                // Track read status for own messages
+                if msg.sender == self.own_id {
+                    if let Some(ref msg_id) = msg.message_id {
+                        self.read_status.entry(msg_id.clone()).or_insert(ReadStatus::Sent);
+                    }
+                }
+
+                // Auto-scroll to bottom on new messages if at bottom
+                let target_tab = if let Some(ref group_id) = msg.group_id {
+                    Tab::Group(group_id.clone())
+                } else if msg.direct {
+                    Tab::DirectMessage(msg.sender.clone())
+                } else {
+                    Tab::Global
+                };
+                let scroll = self.scroll_offset.get(&target_tab).copied().unwrap_or(0);
+                if scroll == 0 {
+                    // Already at bottom, stay there (default behavior)
                 }
 
                 // Handle group messages

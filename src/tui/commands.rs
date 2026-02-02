@@ -19,6 +19,20 @@ impl ChatUI {
             }
 
             match parts[0] {
+                "help" => {
+                    // Show help as a system message in current tab
+                    let tab = self.tabs[self.active_tab].clone();
+                    let commands = Self::get_all_commands();
+                    let mut help_text = String::from("Available commands:\n");
+                    for cmd in &commands {
+                        help_text.push_str(&format!("  /{:<16} {}\n", cmd.name, cmd.description));
+                    }
+                    help_text.push_str("\nTip: Type / to see interactive autocomplete!");
+                    let msg = PlainMessage::system("system".to_string(), help_text);
+                    self.messages.entry(tab).or_insert_with(Vec::new).push(msg);
+                    self.status = "Showing help".to_string();
+                    return;
+                }
                 "dm" => {
                     if parts.len() < 2 {
                         self.status = "Usage: /dm <nickname|peer_id>".to_string();
@@ -114,14 +128,23 @@ impl ChatUI {
         // Regular message (falls through from command handling above)
         let current_tab = &self.tabs[self.active_tab].clone();
 
+        // Reset scroll to bottom when sending a message
+        self.scroll_offset.insert(current_tab.clone(), 0);
+
         match current_tab {
             Tab::Global => {
-                let msg = PlainMessage::new(self.own_id.clone(), text);
+                let mut msg = PlainMessage::new(self.own_id.clone(), text);
+                let msg_id = PlainMessage::generate_id();
+                msg.message_id = Some(msg_id.clone());
+                self.read_status.insert(msg_id, super::types::ReadStatus::Sent);
                 self.messages.entry(Tab::Global).or_insert_with(Vec::new).push(msg.clone());
                 let _ = msg_tx.send(OutgoingMessage::Global(msg));
             }
             Tab::DirectMessage(peer_id) => {
-                let msg = PlainMessage::direct(self.own_id.clone(), text);
+                let mut msg = PlainMessage::direct(self.own_id.clone(), text);
+                let msg_id = PlainMessage::generate_id();
+                msg.message_id = Some(msg_id.clone());
+                self.read_status.insert(msg_id, super::types::ReadStatus::Sent);
                 self.messages.entry(current_tab.clone()).or_insert_with(Vec::new).push(msg.clone());
                 let _ = msg_tx.send(OutgoingMessage::Direct {
                     target_id: peer_id.clone(),
@@ -130,7 +153,10 @@ impl ChatUI {
             }
             Tab::Group(group_id) => {
                 if let Some(group) = self.groups.get(group_id) {
-                    let msg = PlainMessage::group(self.own_id.clone(), text, group_id.clone());
+                    let mut msg = PlainMessage::group(self.own_id.clone(), text, group_id.clone());
+                    let msg_id = PlainMessage::generate_id();
+                    msg.message_id = Some(msg_id.clone());
+                    self.read_status.insert(msg_id, super::types::ReadStatus::Sent);
                     self.messages.entry(current_tab.clone()).or_insert_with(Vec::new).push(msg.clone());
                     let member_ids: Vec<String> = group.members.clone();
                     let _ = msg_tx.send(OutgoingMessage::Group {

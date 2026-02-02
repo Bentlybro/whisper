@@ -93,6 +93,21 @@ impl ChatUI {
         self.own_nickname.clone().unwrap_or_else(|| self.own_id[..12].to_string())
     }
 
+    /// Scroll up by n lines in current tab
+    pub(crate) fn scroll_up(&mut self, n: usize) {
+        let tab = self.tabs[self.active_tab].clone();
+        let current = self.scroll_offset.get(&tab).copied().unwrap_or(0);
+        self.scroll_offset.insert(tab, current.saturating_add(n));
+    }
+
+    /// Scroll down by n lines in current tab (towards bottom)
+    pub(crate) fn scroll_down(&mut self, n: usize) {
+        let tab = self.tabs[self.active_tab].clone();
+        let current = self.scroll_offset.get(&tab).copied().unwrap_or(0);
+        let new_offset = current.saturating_sub(n);
+        self.scroll_offset.insert(tab, new_offset);
+    }
+
     pub(crate) fn next_tab(&mut self) {
         if !self.tabs.is_empty() {
             self.active_tab = (self.active_tab + 1) % self.tabs.len();
