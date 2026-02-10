@@ -193,15 +193,21 @@ History is encrypted with your identity key and stored locally.
 ### What WSP Protects
 
 ✅ **Message Content**: Encrypted with ChaCha20-Poly1305
+
 ✅ **Metadata**: Session IDs are random, rotated
+
 ✅ **Forward Secrecy**: Planned with Double Ratchet protocol
+
 ✅ **Zero Server Storage**: Relay stores nothing to disk
 
 ### What WSP Does NOT Protect
 
 ❌ **Network Metadata**: Your ISP can see you connect to the relay
+
 ❌ **Endpoint Security**: If your device is compromised, messages can be read
+
 ❌ **Relay Availability**: If relay goes down, you're disconnected
+
 ❌ **Traffic Analysis**: Relay sees connection timing (but not content)
 
 ### Recommended Usage
